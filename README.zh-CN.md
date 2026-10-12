@@ -30,8 +30,8 @@ ContextLoom 是一个用 Go 编写的编码智能体 Harness（驾驶舱）。�
 ## 快速开始
 
 ```bash
-git clone https://github.com/contextloom/contextloom-agent.git
-cd contextloom-agent
+git clone https://github.com/liaocatcat/contextloom.git
+cd contextloom
 
 # 1. 配置
 cp config.example.yaml config.yaml   # 填入你的 endpoint / api_key
