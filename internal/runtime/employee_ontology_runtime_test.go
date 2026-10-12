@@ -253,9 +253,10 @@ func TestSpawnTask_DeepProfileInjectedIntoAgentContext(t *testing.T) {
 	}
 
 	// 捕获型 backend：记录每次 Chat/Stream 收到的消息
+	// mu 保护 messages：SpawnTask 返回后 distill goroutine 仍在后台异步调用
+	// Chat（本体能力自动蒸馏），与测试断言并发访问，-race 下必须加锁。
 	captured := &ontologyCaptureBackend{response: "任务完成"}
 	rt.Backend = captured
-
 	_, err := rt.SpawnTask(context.Background(), "main", tools.TaskSpec{
 		Task:      "实现登录函数",
 		Directive: "coder", // 精确员工名 → 员工本体装配
@@ -263,12 +264,12 @@ func TestSpawnTask_DeepProfileInjectedIntoAgentContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpawnTask 错误: %v", err)
 	}
-	if len(captured.messages) == 0 {
+	if len(captured.snapshot()) == 0 {
 		t.Fatal("子 Agent 应至少发起一次模型请求")
 	}
 	// 上下文基线：把全部请求消息拼起来找本体档案段落
 	var all string
-	for _, m := range captured.messages {
+	for _, m := range captured.snapshot() {
 		all += fmt.Sprintf("%v\n", m.Content)
 	}
 	for _, want := range []string{
@@ -286,17 +287,24 @@ func TestSpawnTask_DeepProfileInjectedIntoAgentContext(t *testing.T) {
 }
 
 // captureBackend 记录每次请求消息的模型后端（端到端断言子 Agent 收到的上下文）。
+// messages 的追加与读取可能分属不同 goroutine（主任务请求 vs 后台 distill），
+// 用 mu 串行化；断言读取一律走加锁快照 snapshot()。
 type ontologyCaptureBackend struct {
 	response string
+	mu       sync.Mutex
 	messages []types.Message
 }
 
 func (c *ontologyCaptureBackend) Chat(ctx context.Context, messages []types.Message, tools []types.ToolDefinition) (string, []types.ToolCall, error) {
+	c.mu.Lock()
 	c.messages = append(c.messages, messages...)
+	c.mu.Unlock()
 	return c.response, nil, nil
 }
 func (c *ontologyCaptureBackend) Stream(ctx context.Context, messages []types.Message) (<-chan string, <-chan error) {
+	c.mu.Lock()
 	c.messages = append(c.messages, messages...)
+	c.mu.Unlock()
 	ch := make(chan string, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -305,6 +313,15 @@ func (c *ontologyCaptureBackend) Stream(ctx context.Context, messages []types.Me
 		ch <- c.response
 	}()
 	return ch, errCh
+}
+
+// snapshot 返回消息的加锁快照（避免与后台 goroutine 并发读切片）。
+func (c *ontologyCaptureBackend) snapshot() []types.Message {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]types.Message, len(c.messages))
+	copy(out, c.messages)
+	return out
 }
 func (c *ontologyCaptureBackend) ModelID() string           { return "mock-capture" }
 func (c *ontologyCaptureBackend) MaxContext() int           { return 4096 }
