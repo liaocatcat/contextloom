@@ -16,8 +16,13 @@ import (
 // 这是用户上报场景的端到端复现：跨进程持久化的历史事件 → LoadSession → initialModel。
 func TestE2E_RealData_LoadHistory(t *testing.T) {
 	// 1) 准备数据副本（不污染真实数据）
-	// 测试 cwd = 包目录 internal/tui/，向上两级到项目根
+	// 测试 cwd = 包目录 internal/tui/，向上两级到项目根。
+	// 注意：.contextloom/ 属于运行时数据，被 .gitignore 排除、不随仓库分发；
+	// 本测试依赖本机真实数据，干净克隆/CI 环境无此目录时自动跳过。
 	src := "../../.contextloom/memory"
+	if info, err := os.Stat(src); err != nil || !info.IsDir() {
+		t.Skipf("本机无真实运行数据(%s)，跳过本地 E2E 测试: %v", src, err)
+	}
 	tmp, err := os.MkdirTemp("", "contextloom-e2e-*")
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +49,7 @@ func TestE2E_RealData_LoadHistory(t *testing.T) {
 	}
 
 	// 3) 模拟 main.go --memory-load：LoadSession 恢复 currentSessionID
-	//    仓库自带示例数据（.contextloom/memory/sessions/），取其中首个会话
+	//    取本机真实数据（.contextloom/memory/sessions/）中的首个会话
 	entries, err := os.ReadDir(src + "/sessions")
 	if err != nil {
 		t.Fatalf("读取示例数据目录失败: %v", err)
