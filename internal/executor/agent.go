@@ -1144,6 +1144,35 @@ func (a *Agent) RunStream(ctx context.Context) (<-chan string, <-chan error, err
 			var streamErr error
 			var finishReason string // 流结束原因：stop/tool_calls/length/eof
 
+			// drainStreamCh 非阻塞排空 streamCh 缓冲中已就绪的 chunk。
+			// 竞争根因：StreamEx 在连接中断时先 flushPending 发 ToolCalls chunk
+			// 再发 errCh；主循环 select 中 streamErr 分支命中即退出时，streamCh
+			// 缓冲里已就绪的 ToolCalls chunk 可能未被消费 → toolCalls 为空 →
+			// 走"半句正文重试"分支，工具从不执行（间歇性失败/flaky 测试根因）。
+			// 修复：错误退出前非阻塞排空缓冲，保证 ToolCalls chunk 不丢。
+			drainStreamCh := func() {
+				for {
+					select {
+					case chunk, ok := <-streamCh:
+						if !ok {
+							return
+						}
+						if chunk.FinishReason != "" {
+							finishReason = chunk.FinishReason
+						}
+						if chunk.IsToolCall && len(chunk.ToolCalls) > 0 {
+							toolCalls = append(toolCalls, chunk.ToolCalls...)
+						}
+						if chunk.Content != "" {
+							responseBuf.WriteString(chunk.Content)
+							ch <- chunk.Content
+						}
+					default:
+						return
+					}
+				}
+			}
+
 			for streaming {
 				select {
 				case <-ctx.Done():
@@ -1169,6 +1198,7 @@ func (a *Agent) RunStream(ctx context.Context) (<-chan string, <-chan error, err
 					// 必须继续消费 streamCh 直到其关闭，否则会丢失尾部 chunk
 					if ok && e != nil {
 						streamErr = e
+						drainStreamCh() // 错误退出前排空缓冲，防止 ToolCalls chunk 丢失
 						streaming = false
 					}
 				}
@@ -1943,9 +1973,30 @@ func (a *Agent) RunStreamWithBudget(ctx context.Context, maxIter int) (<-chan st
 					}
 				case e, ok := <-streamErrCh:
 					// 仅在真实错误时结束；errCh 正常关闭（ok=false）不代表流已读完，
-					// 必须继续消费 streamCh 直到其关闭，否则会丢失尾部 chunk
+					// 必须继续消费 streamCh 直到其关闭，否则会丢失尾部 chunk。
+					// 与主循环同一竞争根因：错误退出前必须非阻塞排空 streamCh，
+					// 否则缓冲里已就绪的 ToolCalls chunk 可能未被消费 → 子 Agent
+					// 误判"截断无工具调用"→ 提示重发 → 工具从不执行。
 					if ok && e != nil {
 						streamErr = e
+					drainLoop:
+						for {
+							select {
+							case chunk, ok := <-streamCh:
+								if !ok {
+									break drainLoop
+								}
+								if chunk.IsToolCall && len(chunk.ToolCalls) > 0 {
+									toolCalls = append(toolCalls, chunk.ToolCalls...)
+								}
+								if chunk.Content != "" {
+									responseBuf.WriteString(chunk.Content)
+									ch <- chunk.Content
+								}
+							default:
+								break drainLoop
+							}
+						}
 						streaming = false
 					}
 				}
