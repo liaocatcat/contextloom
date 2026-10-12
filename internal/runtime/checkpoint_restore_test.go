@@ -222,7 +222,7 @@ func TestLaunchAgent_TaskMode_NoFullRollback(t *testing.T) {
 	capture := &sentCaptureBackend{}
 	capture.chatResponse = "检查完成"
 	rt.Backend = capture
-	ch, errCh, err := rt.ProcessInput(t.Context(), "请执行检查")
+	ch, errCh, err := rt.ProcessInput(context.Background(), "请执行检查")
 	if err != nil {
 		t.Fatalf("ProcessInput: %v", err)
 	}

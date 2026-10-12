@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -45,7 +46,7 @@ func TestCompressContext_FlushesEvictPending(t *testing.T) {
 	}
 
 	// 压缩原文应已可检索（flush 已落库）
-	res := rt.HarnessSearch(t.Context(), "压缩冲刷测试", 5)
+	res := rt.HarnessSearch(context.Background(), "压缩冲刷测试", 5)
 	if len(res) == 0 {
 		t.Fatal("压缩后应能检索到压缩原文（flush 未落库）")
 	}
@@ -77,7 +78,7 @@ func TestAddToHistory_FlushesEvictPending(t *testing.T) {
 	if pending != 0 {
 		t.Fatalf("AddToHistory 后 evictPending 应清空，got %d", pending)
 	}
-	res := rt.HarnessSearch(t.Context(), "增量压缩冲刷", 5)
+	res := rt.HarnessSearch(context.Background(), "增量压缩冲刷", 5)
 	if len(res) == 0 {
 		t.Fatal("增量压缩的原文应可检索到（flush 未落库）")
 	}
