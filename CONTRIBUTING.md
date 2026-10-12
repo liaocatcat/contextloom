@@ -5,8 +5,8 @@ Thanks for your interest in contributing! This document covers the ground rules.
 ## Development workflow
 
 ```bash
-git clone https://github.com/contextloom/contextloom-agent.git
-cd contextloom-agent
+git clone https://github.com/liaocatcat/contextloom.git
+cd contextloom
 go build ./...
 go test ./...
 ```

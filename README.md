@@ -30,8 +30,8 @@ ContextLoom is a coding-agent harness written in Go. It drives an LLM through yo
 ## Quick start
 
 ```bash
-git clone https://github.com/contextloom/contextloom-agent.git
-cd contextloom-agent
+git clone https://github.com/liaocatcat/contextloom.git
+cd contextloom
 
 # 1. configure
 cp config.example.yaml config.yaml   # set your endpoint / api_key
