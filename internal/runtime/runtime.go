@@ -120,6 +120,11 @@ type Runtime struct {
 	childMu      sync.Mutex
 
 	// 员工中心（M3 接线）：惰性加载的员工档案缓存 + 门禁状态（M5 接线）
+
+	// 预设→后端实例缓存（model_select.go：员工绑定/子 Agent 自选模型解析）。
+	// per-Runtime（配置不同实例不同）；applyLiveConfig 调 InvalidateModelCache
+	// 失效，预设热更新后重建。presetCacheMu 保护（map 惰性创建）。
+	presetCache  map[string]presetCacheEntry
 	employees    *employeeCenter
 	employeeOnce sync.Once // 员工中心单例初始化（P2-2：并发首次访问 lost-update 竞态修复）
 	gates        *gateState
@@ -1418,6 +1423,11 @@ func (rt *Runtime) applyLiveConfig(patch map[string]any) []string {
 			AnchorRatio:    rt.Config.Harness.AnchorRatio,
 		})
 	}
+
+	// 3.5) 预设→后端实例缓存失效：模型预设热更新（/model 切换、config.set、
+	// GUI 设置面板保存）后，员工绑定/子 Agent 自选模型的解析必须重建实例，
+	// 否则会继续用旧 endpoint/api_key/max_context 的缓存后端。
+	rt.InvalidateModelCache()
 
 	// 4) 本次补丁中需重启生效的字段清单（启动期创建、无热重建链路的组件）
 	// 注：cli_defaults.* 不在此列——effort 已热下发到后端；mode/key_newline 每次
@@ -3137,18 +3147,23 @@ func (rt *Runtime) SpawnTask(ctx context.Context, parentID string, spec tools.Ta
 	// 子 Agent 用过滤后的工具表（移除 spawn_task/handoff 防递归）；
 	// 员工命中时进一步按其 allow/deny 过滤（M3：无限制员工 = 默认全表）
 	filteredTools := rt.Tools.CloneWithout("spawn_task", "handoff")
-	backendReq := modelgateway.Req{Task: "spawn_task", Role: spec.Directive}
+	// 网关路由谓词：Role=员工名（命中 role=<员工名> 规则，如 role=reviewer）；
+	// Task=spawn_task:<员工名>（员工维度路由仍可用）。未命中员工时 Role 为空。
+	backendReq := modelgateway.Req{Task: "spawn_task"}
 	if emp != nil {
 		policy, perr := emp.ResolvePolicy()
 		if perr == nil {
 			filteredTools = rt.employeeTools(emp)
-			if policy.ModelPreset != "" {
+			if policy.ModelPreset != "" || len(policy.ModelFallbacks) > 0 {
 				backendReq.Task = "spawn_task:" + emp.Name
-				backendReq.Role = policy.ModelPreset
 			}
+			backendReq.Role = emp.Name
 		}
 	}
-	agent := rt.Executor.SpawnAgent(childID, task, rt.selectBackend(ctx, backendReq))
+	// 子 Agent 后端解析（自选模型核心链路）：
+	// spec.Model（spawn_task model 参数）> 员工 model.preset+fallbacks（多来源
+	// 组合，不依赖 gateway 配置）> 网关 role=<员工名> 规则 > 默认后端。
+	agent := rt.Executor.SpawnAgent(childID, task, rt.resolveSubAgentBackend(ctx, spec.Model, emp, backendReq))
 	agent.SetTools(filteredTools)
 	agent.SetTracer(rt)
 	agent.SetDepth(1)

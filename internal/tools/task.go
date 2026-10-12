@@ -135,6 +135,9 @@ type TaskSpec struct {
 	Task      string // 自包含的子任务描述
 	Directive string // 指令类型（可选）
 	Context   string // 传递给子任务的上下文摘要（可选）
+	// Model 子任务自选模型（可选）：models 列表中的预设名。子 Agent 用该
+	// 预设的后端执行任务，实现"自选模型"；空 = 按员工档案绑定/网关路由。
+	Model string
 }
 
 // ── singleflight：合并相同 task 描述的并发 spawn（需求 §5.1）──
@@ -201,6 +204,9 @@ func MakeSpawnTaskTool(spawner TaskSpawner) ToolFunc {
 		}
 		if c, ok := params["context"].(string); ok {
 			spec.Context = c
+		}
+		if m, ok := params["model"].(string); ok {
+			spec.Model = m
 		}
 
 		// 子任务启动/完成/失败的 § 信号由 SpawnTask 统一发送（SpawnTask 知道 childID）

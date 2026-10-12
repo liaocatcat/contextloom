@@ -430,6 +430,7 @@ var toolSchemas = map[string]map[string]any{
 			"task":      map[string]any{"type": "string", "description": "自包含子任务描述（必填），必须是有明确产出的任务（新增/修改文件、测试结果、生成文档等）。子任务执行无固定超时：持续输出时不设限，仅当连续 10 分钟无任何输出才终止（有输出即重置计时）"},
 			"directive": map[string]any{"type": "string", "description": "指令或员工名: 可直接传员工名（coder/tester/product/reviewer/writer/translator，按员工档案装配工具/人设/模型），或通用指令（CODE_AGENT/TEST/REFACTOR/PLANNER/REVIEW/WRITE/TRANSLATE，自动映射到对应员工）"},
 			"context":   map[string]any{"type": "string", "description": "传递给子任务的上下文摘要（可选）"},
+			"model":     map[string]any{"type": "string", "description": "子任务自选模型（可选）: models 列表中的模型预设名，子 Agent 用该模型执行任务（多来源搭配组合）；空 = 按员工档案 model.preset/fallbacks 绑定，或网关路由"},
 		},
 		"required": []string{"task"},
 	},
