@@ -1,0 +1,230 @@
+# 配置文件模板:复制为 config.yaml 并填入你的 API Key
+# 注意:config.yaml 已被 .gitignore 忽略,严禁提交到 Git
+
+# 当前激活的模型预设名（必须是下方 models 列表中的 name）
+active_model: "local-model"
+
+# 多模型预设列表：模型配置的唯一定义处（不再有独立的 model: 配置节）。
+# /model <名称>（TUI）或 GUI 设置面板"模型预设"下拉一键切换；
+# 切换时按预设的 backend/endpoint/api_key 等重建后端与上下文预算，保存即生效。
+#
+# backend 说明（三选一，均走 OpenAI /v1/chat/completions 协议族）：
+#   openai / openai-compatible / llama / ollama / local:
+#     任意 OpenAI 兼容端点，api_key 可为空（本地模型），
+#     空时回退环境变量 OPENAI_API_KEY；不发送 reasoning_effort（兼容严格校验的服务）
+#   deepseek:
+#     DeepSeek 官方通道，发送 reasoning_effort，api_key 必填或 DEEPSEEK_API_KEY
+models:
+  - name: "local-model"             # 切换标识（/model local-model）
+    backend: "openai-compatible"    # openai-compatible/llama/ollama/local=OpenAI 兼容；deepseek=官方通道（发 effort）
+    endpoint: "http://127.0.0.1:8080/v1"      # 示例: llama.cpp/vLLM 本地端点；或填任意 OpenAI 兼容服务
+    api_key: ""                     # 本地服务可留空；远程服务填密钥或使用环境变量 OPENAI_API_KEY
+    max_context: 1000000
+    top_p: 0.95
+    temperature: 1.0
+    # 识图模型：输入检测到图片时，本轮自动切换的模型 ID（空=不切换，沿用主模型）。
+    vision_model: ""
+    # 是否支持多模态识图。默认 false=检测到图片自动降级为路径文本提示
+    # （后端不支持 image_url 时发送会报 400）。
+    supports_vision: false
+    # 是否向 API 发送 reasoning_effort（思考强度）参数。默认 true（打开）。
+    send_effort: true
+  # - name: "gpt-4o"                # 示例：OpenAI 兼容多模态
+  #   backend: "openai"
+  #   endpoint: "https://api.openai.com/v1"
+  #   api_key: "sk-xxxx"
+  #   max_context: 128000
+  #   supports_vision: true
+  #   vision_model: "gpt-4o"
+  #   send_effort: false
+  # - name: "qwen"                 # 示例：通义千问（DashScope OpenAI 兼容）
+  #   backend: "openai"
+  #   endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  #   api_key: "sk-xxxx"
+  #   max_context: 131072
+
+# ── 模型网关（可选，工具链体系升级方案 §4.2）──────────────────────────────
+# 不配置本节的任何内容 = 行为与旧版完全一致（默认池 = 当前激活预设）。
+# 配置后：按规则给不同任务/角色/场景自动分配模型池；多 Key 池化防限流互踩；
+# 熔断自动降级（提示可见）；GUI 设置面板有对应的"网关路由"可视化编辑器。
+#   rules.when 谓词（逗号分隔=交集）:
+#     role=coder | role=reviewer | task=vision | task=chat | budget<=low | default
+#   pools.<池名>: 池名可= models 中的预设名（自动继承该预设的 backend/endpoint/api_key），
+#     keys 可写多个 key 轮换；max_concurrent=每池并发上限；retries=重试次数。
+#     retry_base/acquire_timeout/cooldown 均支持 "100ms"/"30s" 写法。
+gateway:
+  default: "default"
+  rules:
+    # - { when: "role=reviewer", use: "strong-model" }   # 评审用强模型（员工中心 M3 生效）
+    # - { when: "task=vision",   use: "vision-model" }           # 视觉任务自动走多模态池
+    # - { when: "budget<=low",   use: "cheap-model" } # 省钱档
+    # - { when: "default",       use: "default" }
+  pools:
+    # default:
+    #   backend: "openai-compatible"
+    #   keys: [ "sk-key-a", "sk-key-b" ]   # 多 Key 轮换；或 api_key: 单 Key
+    #   max_concurrent: 4
+    #   retries: 3
+    #   retry_base: "100ms"
+    #   fail_threshold: 3
+    #   cooldown: "30s"
+
+# ── 升级方案目录约定（可选进阶，全部支持 GUI 便捷操作，§4.7）──────────────
+# 以下四个目录全部可选：不存在即对应能力不生效，行为与旧版完全一致。
+# GUI 设置面板提供对应编辑器（员工向导/工具链画布/场景向导/门禁开关），
+# 产出即这些 YAML 文件——不会 YAML 也能用。
+#
+# 1) 员工中心（M3）：.contextloom/employees/<name>/employee.yaml
+#    SpawnTask 的 directive 用员工名即命中（如 spawn_task(directive="coder")），
+#    员工档案约束角色/人格/工具权限/模型绑定。内置 6 员工（writer/coder/
+#    tester/reviewer/product/translator）在 GUI 员工向导可一键实例化。
+#    employee.yaml 字段：name/display/role/persona/model.preset/
+#    tool_allowlist/tool_denylist/memory.slice/approval/skills
+#
+# 2) 场景中心（M4）：.contextloom/scenes/<name>/scene.yaml
+#    chat 输入命中 keywords 即自动接管（如"帮我写周报"→ weekly 场景），
+#    未命中与旧版裸 chat 完全一致。字段：name/display/keywords/
+#    intent_prompt/team/models/toolchain/approval/output/verify/triggers
+#
+# 3) 工具链工厂（M2）：.contextloom/chains/<name>/toolchain.yaml
+#    DAG 流水线：tool/llm/ref 三类步骤、depends_on 依赖、$ref 产物协议。
+#    场景与团队编排可引用链名。字段：name/version/params/steps[*]/…
+#
+# 4) 质量门禁（M5）：.contextloom/gates/（目录存在即启用，gate.yaml 可选）
+#    目标循环每轮结束时强制门禁：静态核查 + 测试 TEE 实测，不过不外显
+#    （禁写 [GOAL_DONE]，缺陷注入下一轮修复清单）；目录不存在 = 门禁关闭。
+#    质量三档（可选 gate.yaml：level: standard|fast|none + pass_score: 0-100，
+#    缺省 = standard/90；GUI 门禁面板保存即写入，下一轮 goal 生效）：
+#    standard（默认全开）/fast（仅静检，关 TEE）/none（关闭，回旧行为）。
+#    每轮 Fail 裁决把缺陷签名写入 quality_ledger.yaml（持久怀疑记录，
+#    重启累计不丢失）；GUI 质检面板有三档开关 + 门禁拦截徽标 + 账本只读面板。
+
+harness:
+  score_threshold: 50
+  decay_factor: 0.9
+  anchor_ratio: 0.2
+
+project:
+  root: "."                        # 项目根；为空或 "." 时 = 启动 contextloom 时所在目录（CWD），.contextloom/ 数据落于此；可显式指定绝对路径
+  vocab: ".contextloom/vocab.json"
+
+acp:
+  enabled: true
+  port: 20250
+
+plugins:
+  enabled: true
+  # 用户级插件目录（个人通用插件，跨项目共享，默认 ~/.contextloom/plugins）。
+  # 项目级 .contextloom/plugins/ 自动合并扫描（团队共享，可随项目提交），同名插件项目级优先。
+  directory: "~/.contextloom/plugins"
+  sandbox:
+    memory_limit_mb: 256
+    cpu_limit: 0.5
+
+overseer:
+  pass_threshold: 90        # 监工评分通过阈值（低于时界面提示⚠，回复仍完整入史保证聊天记录不缺失）
+  node_auto_plan: true      # 自动创建计划节点：task 模式按输入拆分主子任务并估算复杂度
+  test_tee: true            # 测试透明代理（防自我欺骗）：false 时跳过沙箱测试对比
+  temp_doc_policy: "session_only"  # 临时文档策略: session_only(会话结束清理)/persistent(保留)
+
+memory:
+  directory: ".contextloom/memory"
+  auto_title: true
+  max_sessions: 1000
+
+# 上下文预算控制（token 预算驱动的渐进式压缩，替代旧版按条数断崖截断）
+# 阈值均为用量比例 [0,1]，自动保证 compact < hard < safety 单调
+context:
+  compact_ratio: 0.70   # 达到 70% 开始前缀截断旧消息
+  hard_ratio: 0.85      # 达到 85% 丢弃最旧消息（累积滚动摘要）
+  safety_ratio: 0.92    # 发送前兜底红线（超限自动压缩/强制收尾）
+  keep_recent: 8        # 至少保留的完整消息条数（永不丢弃）
+
+cli_defaults:
+  model: "local-model"
+  # 工作模式（/mode 切换）：
+  #   chat（默认）: 单对话，自然语言
+  #   task        : 多任务并发，JSON 极简提示词，一次执行即结束
+  #   goal        : 目标持久循环——跨轮自动续跑直到 [GOAL_DONE]/轮次上限/token 预算（/goal 管理）
+  # 思考深度（默认 max，最高推理强度）：
+  #   low/medium/high  → 实际发送 high
+  #   xhigh/max        → 实际发送 max
+  # 不配置时默认 max；可用 /effort <level> 动态调整
+  effort: "max"
+  threshold: 50
+  overseer_threshold: 90
+
+# 工具审批预设（解决"权限审批模型复杂、无一键预设"）
+#   standard（默认）: 标准谨慎模式——敏感写操作/命令需确认（chat 模式）
+#   permissive    : 全自动执行——无确认弹窗（无人值守）
+#   strict        : 严格模式——所有写操作和命令都确认（高风险场景）
+# 注意: task/goal 模式（自动化执行）无论此设置如何都自动批准
+tools:
+  approval_mode: "standard"
+
+# 轻量可观测性（JSONL trace，按日轮转 .contextloom/trace/trace-YYYYMMDD.jsonl）
+# 记录 agent 每轮迭代/工具调用/耗时/错误——多轮失败归因与评估回归的原始数据源
+# 查看: TUI 内 /trace 命令，或命令行 contextloom trace --tail 50
+trace:
+  enabled: true
+  # OTLP/HTTP+JSON 导出（OpenTelemetry 标准接入）：配置接收端后，
+  # 每条 trace 记录批量/定时冲刷为 OTLP LogsData（resourceLogs/logRecords），
+  # 可接入 OpenTelemetry Collector / Langfuse / Jaeger 等（零依赖手写协议）。
+  # 留空 = 仅本地 JSONL（.contextloom/trace/trace-YYYYMMDD.jsonl）
+  export_endpoint: ""
+  # 附加 HTTP 头（如 Authorization: Bearer xxx；YAML 映射）
+  export_headers: {}
+  # 批量条数（满即导出）与定时冲刷秒
+  export_batch: 32
+  export_interval: 5
+
+# MCP Client（消费外部 MCP 生态，协议位势补全）
+# 每个 server 的工具动态注册为 "mcp.<名称>.<工具>" 供模型调用（无需确认，显式配置即信任）
+# 示例（注释掉）:
+# mcp:
+#   servers:
+#     filesystem:
+#       command: "npx"
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+#       enabled: true
+
+# 外部消息渠道（对标业界同类 Agent 的消息渠道 的零依赖落地）
+#   webhook: HTTP 接收外部消息触发 goal/task/chat（随机端口 + token 鉴权）
+#     触发: POST http://127.0.0.1:<端口>/hook/<token> {"message":"...","mode":"goal|task|chat"}
+#     查询: GET  /history（最近 50 条触发记录）
+#   cron: 按 5 字段 cron 表达式定时触发（分 时 日 月 周），调度精度 30 秒内
+channels:
+  webhook:
+    enabled: false
+    # token: "自定义token"   # 留空=启动时自动生成并打印
+  cron:
+    enabled: false
+    # jobs:
+    #   - name: "daily-report"        # 任务名（唯一）
+    #     schedule: "0 9 * * *"       # 每天 09:00
+    #     mode: "goal"                # goal / task / chat
+    #     prompt: "生成昨日项目进展报告"
+
+# 工具沙箱（对标 OpenHands/Claude Code 沙箱的零依赖落地）
+#   enabled: 所有文件写操作重定向到影子文件系统 .contextloom/sandbox/（读镜像优先、列表合并），
+#            exec 命令工作目录进入镜像 + 资源限制（Linux rlimit）
+#   网络隔离: 沙箱会话内命令默认网络拒绝——HTTP(S)_PROXY/ALL_PROXY（大小写双份）
+#            强制指向死端口 http://127.0.0.1:9（连接立即失败），删除 NO_PROXY/no_proxy
+#            防豁免绕过，并置 CONTEXTLOOM_SANDBOX_NET=deny 标记
+#            （对标前沿容器网络隔离 --network=none 的零依赖落地，防沙箱内命令外联）
+#   discard_on_exit: true=退出丢弃全部沙箱改动（默认）；false=保留镜像
+#   运行中: /sandbox 查看状态；/sandbox commit 合并写回真实文件；/sandbox discard 丢弃
+sandbox:
+  enabled: false
+  discard_on_exit: true
+
+# 预览渲染（GUI Markdown 预览）
+#   plantuml_server:  plantuml-server 根地址。默认公网 https://www.plantuml.com/plantuml；
+#                     可配内网/自建服务（如 http://127.0.0.1:8080/plantuml）。
+#                     GUI 预览中的 ```plantuml 代码块经本地代理渲染为 SVG——
+#                     同源请求天然规避跨域限制（响应亦附加 CORS 头），
+#                     server 不可达时预览自动兜底显示源码，不影响阅读。
+#   plantuml_enabled: true=渲染为图（默认）；false=按普通代码块展示
+preview:
+  plantuml_server: "https://www.plantuml.com/plantuml/svg"
+  plantuml_enabled: true

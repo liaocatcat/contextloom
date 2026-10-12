@@ -1,0 +1,24 @@
+# build artifacts (root binaries) — leading / to avoid matching cmd/*/ source dirs
+/contextloom
+/contextloom-*
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+.idea/
+.vscode/
+*.swp
+*.swo
+dist/
+/vendor/
+
+# per-project runtime data (sessions/plugins/trace/sandbox) — never track
+/.contextloom/
+
+# local configs containing API keys
+config.yaml
+config.local.yaml
+*.yaml.bak
+*.yml.bak
