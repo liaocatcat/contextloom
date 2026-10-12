@@ -47,13 +47,22 @@ Point `models[0].endpoint` at any OpenAI-compatible service, e.g. a local llama.
 
 ## Building
 
+Prefer raw `go` commands? Everything works without Make:
+
+```bash
+go build -ldflags="-s -w" -o contextloom ./cmd/contextloom   # current platform (TUI)
+go test -race -cover ./...                                    # tests
+```
+
+Or use the Makefile, which wraps the same commands plus project-specific guards:
+
 ```bash
 make build    # current platform binary (TUI)
 make test     # tests with -race and coverage
 make lint     # golangci-lint
 ```
 
-Cross-compilation is native Go — set `GOOS`/`GOARCH`, e.g. `GOOS=linux GOARCH=arm64 go build -o contextloom-linux-arm64 ./cmd/contextloom`.
+Cross-compilation is native Go — set `GOOS`/`GOARCH`, e.g. `GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-linux-arm64 ./cmd/contextloom`.
 
 ### Desktop GUI (optional)
 
@@ -63,6 +72,8 @@ make build-gui-win      # cross-compile Windows GUI (needs mingw-w64; PE subsyst
 make build-gui-macos    # package a macOS .app bundle
 make verify-gui         # verify the GUI PE subsystem flag
 ```
+
+Raw equivalent (why `make` is recommended here): the GUI build needs `CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 go build -tags production -ldflags="-s -w -H windowsgui"` — omitting `-H windowsgui` yields a console-subsystem exe that flashes a terminal window on launch. The Makefile also auto-runs `scripts/pecheck` to verify the PE subsystem flag, guarding against regressions.
 
 The GUI shell launches the `contextloom` backend from its own directory (or via `CONTEXTLOOM_BIN`), so keep both binaries side by side.
 

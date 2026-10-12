@@ -47,13 +47,22 @@ go run ./cmd/contextloom
 
 ## 构建
 
+不想用 make？裸 go 命令完全可用：
+
+```bash
+go build -ldflags="-s -w" -o contextloom ./cmd/contextloom   # 当前平台（TUI）
+go test -race -cover ./...                                    # 测试
+```
+
+或使用 Makefile（封装同样的命令，外加项目专属校验）：
+
 ```bash
 make build    # 当前平台二进制（TUI）
 make test     # 测试（-race + 覆盖率）
 make lint     # golangci-lint
 ```
 
-交叉编译是 Go 原生能力——设置 `GOOS`/`GOARCH` 即可，例如 `GOOS=linux GOARCH=arm64 go build -o contextloom-linux-arm64 ./cmd/contextloom`。
+交叉编译是 Go 原生能力——设置 `GOOS`/`GOARCH` 即可，例如 `GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-linux-arm64 ./cmd/contextloom`。
 
 ### 桌面 GUI（可选）
 
@@ -63,6 +72,8 @@ make build-gui-win      # 交叉编译 Windows GUI（需 mingw-w64；自动校�
 make build-gui-macos    # 打包 macOS .app
 make verify-gui         # 校验 GUI PE 子系统标志
 ```
+
+裸 go 等价命令（也是推荐用 make 的原因）：GUI 构建需要 `CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 go build -tags production -ldflags="-s -w -H windowsgui"`——漏掉 `-H windowsgui` 会产出 console 子系统 exe，启动时弹出黑色命令行窗口。Makefile 还会自动跑 `scripts/pecheck` 校验 PE 子系统标志，防止回归。
 
 GUI 外壳会从自身所在目录拉起 `contextloom` 后端（或通过 `CONTEXTLOOM_BIN` 指定），请把两个二进制放在同一目录。
 
