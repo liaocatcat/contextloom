@@ -78,8 +78,23 @@ gateway:
 #    SpawnTask 的 directive 用员工名即命中（如 spawn_task(directive="coder")），
 #    员工档案约束角色/人格/工具权限/模型绑定。内置 6 员工（writer/coder/
 #    tester/reviewer/product/translator）在 GUI 员工向导可一键实例化。
-#    employee.yaml 字段：name/display/role/persona/model.preset/
+#    employee.yaml 字段：name/display/role/persona/model.preset/model.fallbacks/
 #    tool_allowlist/tool_denylist/memory.slice/approval/skills
+#
+#    模型绑定与多来源搭配组合（M3+）：
+#      model:
+#        preset: "pro-model"            # 主来源模型预设（models 列表中的 name）
+#        fallbacks: ["flash-model"]     # 备选来源链：主来源限流/熔断/不可用时自动切换
+#    - preset 直接解析为后端实例（不依赖 gateway 配置，此前仅作为网关 Role 谓词）；
+#    - fallbacks 可跨 provider/endpoint/model 组合（本地+远程混搭）；
+#    - 子 Agent 调 spawn_task 时还可传 model 参数临时自选（优先级最高），
+#      优先级: spawn_task model 参数 > 员工 model.preset+fallbacks > 网关规则 > 默认模型。
+#    示例 employee.yaml（评审员用强模型，主不可用降级快模型）：
+#      name: reviewer
+#      role: 审查代码与产出、把关质量
+#      model:
+#        preset: "pro-model"
+#        fallbacks: ["flash-model"]
 #
 # 2) 场景中心（M4）：.contextloom/scenes/<name>/scene.yaml
 #    chat 输入命中 keywords 即自动接管（如"帮我写周报"→ weekly 场景），

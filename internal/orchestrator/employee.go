@@ -213,10 +213,79 @@ func (e *Employee) MergeDeepDefaults() *Employee {
 	return &out
 }
 
-// ModelBinding binds an employee to a model preset. An empty Preset means
+// ModelBinding binds an employee to a model preset, optionally with a chain
+// of fallback presets for multi-source combination. An empty Preset means
 // "let the model gateway route" (no explicit binding).
+//
+// 多来源搭配组合（M3+ 增强）：Preset 是主来源，Fallbacks 是跨来源降级链。
+// 运行时把各预设解析为后端实例并按序组合成一条链（ChainBackend）：主来源
+// 限流/熔断/不可用时自动切到备选来源（可跨 provider/endpoint/model）。
+// 例：
+//
+//	model:
+//	  preset: "pro-model"          # 主：强模型（评审/规划）
+//	  fallbacks: ["flash-model"]   # 备：主不可用时自动降级到快模型
 type ModelBinding struct {
-	Preset string `yaml:"preset"`
+	Preset    string   `yaml:"preset"`
+	Fallbacks []string `yaml:"fallbacks,omitempty"`
+}
+
+// Select 返回第 i 个来源的预设名（i=0 为主来源，i>0 依次取 Fallbacks）。
+// 越界返回 ""（无该来源）。空主来源时 i=0 亦返回 ""（由网关路由）。
+func (m ModelBinding) Select(slot int) string {
+	if slot == 0 {
+		return m.Preset
+	}
+	idx := slot - 1
+	if idx < 0 || idx >= len(m.Fallbacks) {
+		return ""
+	}
+	return m.Fallbacks[idx]
+}
+
+// Presets 返回去重保序的全部来源预设名（主来源在前，跳过空项）。
+// 供运行时把每个预设解析为后端实例并组合成降级链。
+func (m ModelBinding) Presets() []string {
+	var out []string
+	seen := make(map[string]struct{})
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	add(m.Preset)
+	for _, f := range m.Fallbacks {
+		add(f)
+	}
+	return out
+}
+
+// NormalizeBinding 规范化模型绑定：主来源与备选来源去空白、去重（备选中与
+// 主来源重名者被移除，避免组合链上重复实例）。返回规范化后的副本。
+func NormalizeBinding(m ModelBinding) ModelBinding {
+	out := ModelBinding{Preset: strings.TrimSpace(m.Preset)}
+	seen := map[string]struct{}{}
+	if out.Preset != "" {
+		seen[out.Preset] = struct{}{}
+	}
+	for _, f := range m.Fallbacks {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if _, dup := seen[f]; dup {
+			continue
+		}
+		seen[f] = struct{}{}
+		out.Fallbacks = append(out.Fallbacks, f)
+	}
+	return out
 }
 
 // MemorySlice points the employee at a persistent memory slice (reused by
@@ -303,12 +372,14 @@ func FinalTools(allowlist, denylist []string) []string {
 }
 
 // EmployeePolicy is the resolved runtime policy of an employee (§4.1/§4.6):
-// the model preset (empty = gateway routes), the normalized approval preset
-// and the final tool set.
+// the model preset (empty = gateway routes), the cross-source fallback
+// presets (multi-source combination), the normalized approval preset and the
+// final tool set.
 type EmployeePolicy struct {
-	ModelPreset string
-	Approval    string
-	Tools       []string
+	ModelPreset    string
+	ModelFallbacks []string
+	Approval       string
+	Tools          []string
 }
 
 // ResolvePolicy derives the effective runtime policy from the raw profile.
@@ -317,10 +388,12 @@ func (e *Employee) ResolvePolicy() (EmployeePolicy, error) {
 	if err != nil {
 		return EmployeePolicy{}, err
 	}
+	binding := NormalizeBinding(e.Model)
 	return EmployeePolicy{
-		ModelPreset: e.Model.Preset,
-		Approval:    approval,
-		Tools:       FinalTools(e.ToolAllowlist, e.ToolDenylist),
+		ModelPreset:    binding.Preset,
+		ModelFallbacks: binding.Fallbacks,
+		Approval:       approval,
+		Tools:          FinalTools(e.ToolAllowlist, e.ToolDenylist),
 	}, nil
 }
 
@@ -386,17 +459,18 @@ func ExampleEmployees() []Employee {
 			Skills:        []string{"test-writer", "bug-hunter"},
 		},
 		{
-			Name:          "reviewer",
-			Display:       "评审员老严",
-			Role:          "审查代码与产出、把关质量",
-			Persona:       "只信证据不信口供；挑刺优先；不通过绝不签字",
-			Expertise:     []string{"代码审查", "安全扫描", "性能分析", "质量门禁"},
-			Workflow:      []string{"先读变更影响面", "逐维度审查（正确性/安全/性能/可维护）", "逐条给证据与修复建议", "输出分级结论"},
-			Constraints:   []string{"禁止无证据的批评", "每个问题必须给文件:行定位", "宁严勿宽，不通过直接说明理由"},
-			Experience:    []string{"'看上去没 bug'不等于'验证过没 bug'", "并发/边界/资源释放是最常被忽略的点"},
-			OutputFormat:  "分级问题清单（🔴严重/🟡建议/⚪风格）+ 总体评分 1-10",
-			Workspace:     "workspace",
-			Model:         ModelBinding{Preset: "pro-model"},
+			Name:         "reviewer",
+			Display:      "评审员老严",
+			Role:         "审查代码与产出、把关质量",
+			Persona:      "只信证据不信口供；挑刺优先；不通过绝不签字",
+			Expertise:    []string{"代码审查", "安全扫描", "性能分析", "质量门禁"},
+			Workflow:     []string{"先读变更影响面", "逐维度审查（正确性/安全/性能/可维护）", "逐条给证据与修复建议", "输出分级结论"},
+			Constraints:  []string{"禁止无证据的批评", "每个问题必须给文件:行定位", "宁严勿宽，不通过直接说明理由"},
+			Experience:   []string{"'看上去没 bug'不等于'验证过没 bug'", "并发/边界/资源释放是最常被忽略的点"},
+			OutputFormat: "分级问题清单（🔴严重/🟡建议/⚪风格）+ 总体评分 1-10",
+			Workspace:    "workspace",
+			// 多来源搭配示例：主来源强模型，主不可用时降级快模型（ChainBackend）
+			Model:         ModelBinding{Preset: "pro-model", Fallbacks: []string{"flash-model"}},
 			ToolAllowlist: []string{"read_file", "git_diff", "search_content", "list_files"},
 			ToolDenylist:  []string{"write_file", "replace_in_file"},
 			Memory:        MemorySlice{Slice: "project:review"},

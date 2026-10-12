@@ -507,7 +507,7 @@ func TestMultiAgentTools_SchemaComplete(t *testing.T) {
 		t.Error("spawn_task schema 缺少 required: [task]——模型可能不带 task 调用导致执行报错")
 	}
 	props := sp["properties"].(map[string]any)
-	for _, p := range []string{"task", "directive", "context"} {
+	for _, p := range []string{"task", "directive", "context", "model"} {
 		if _, ok := props[p]; !ok {
 			t.Errorf("spawn_task schema 缺少参数 %q", p)
 		}

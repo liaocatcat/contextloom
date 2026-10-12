@@ -282,8 +282,8 @@ func (rt *Runtime) EmployeeNames() []string {
 	return names
 }
 
-// EmployeeSummary 返回单名员工的可读摘要（名称/岗位/专精/工作区），供
-// /emp 命令与 GUI 展示。员工不存在 → ""。
+// EmployeeSummary 返回单名员工的可读摘要（名称/岗位/专精/工作区/模型绑定），
+// 供 /emp 命令与 GUI 展示。员工不存在 → ""。
 func (rt *Runtime) EmployeeSummary(name string) string {
 	emp := rt.employeeByName(name)
 	if emp == nil {
@@ -300,6 +300,13 @@ func (rt *Runtime) EmployeeSummary(name string) string {
 	}
 	if emp.Workspace != "" {
 		b.WriteString(" · 工作区: " + emp.Workspace)
+	}
+	// 模型绑定（自选模型/多来源搭配）：主来源 + 备选来源链一目了然
+	if binding := orchestrator.NormalizeBinding(emp.Model); binding.Preset != "" {
+		b.WriteString(" · 模型: " + binding.Preset)
+		if len(binding.Fallbacks) > 0 {
+			b.WriteString("（备选: " + strings.Join(binding.Fallbacks, "→") + "）")
+		}
 	}
 	return b.String()
 }
