@@ -17,6 +17,9 @@ dist/
 # per-project runtime data (sessions/plugins/trace/sandbox) — never track
 /.contextloom/
 
+# DsMind harness local runtime state (checkpoints/trace/harness index/memory) — never track
+/.dsmind/
+
 # local configs containing API keys
 config.yaml
 config.local.yaml

@@ -1,0 +1,376 @@
+# 从源码构建 ContextLoom（全平台矩阵）
+
+本页是 ContextLoom 完整、可直接复制粘贴的构建参考。覆盖 **TUI**（纯 Go，零 CGO）与 **GUI** 桌面外壳（Wails/WebView，需 CGO）在所有受支持目标平台上的构建——不省略、不藏标志。
+
+> 相关页面：[../README.zh-CN.md](../README.zh-CN.md)（项目总览）·
+> [architecture.md](architecture.md)（分层与运行时）·
+> [toolchain.md](toolchain.md)（员工/场景/工具链/门禁）。
+> 英文版：[build.md](build.md)。
+
+## 0. 速览
+
+```bash
+# TUI —— 当前平台，一条命令：
+make build
+
+# TUI —— 任意目标（纯 Go，无需额外工具链）：
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64 ./cmd/contextloom
+
+# GUI —— 当前平台（需 C 工具链 + WebView 开发库）：
+CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+
+# GUI —— 从任意主机交叉编译 Windows（需 mingw-w64；-H windowsgui 必带）：
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+  go build -tags production -ldflags="-s -w -H windowsgui" \
+  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+```
+
+两个构建单元，两条规则：
+
+| 单元 | 源码 | CGO | 能否交叉编译？ |
+|---|---|---|---|
+| TUI `contextloom` | `./cmd/contextloom` | **关**（`CGO_ENABLED=0`） | 可以，覆盖所有 Go 目标 |
+| GUI `contextloom-gui` | `./cmd/contextloom-gui` | **开**（`CGO_ENABLED=1`） | 仅在具备匹配的交叉 C 工具链时（Windows 用 mingw-w64） |
+
+## 1. 前置条件
+
+- **Go 1.22+**（`go version`）。模块为 `github.com/contextloom/contextloom-agent`（见 `go.mod`）。
+- **TUI**：无需其他。纯 Go，无 C 工具链、无系统库。
+- **GUI**：C 编译器 + 平台 WebView 头文件：
+  - macOS：Xcode Command Line Tools（`xcode-select --install`）。
+  - Windows：mingw-w64（本机，或从 macOS/Linux 交叉编译时使用）。
+  - Linux：GTK 3 + WebKitGTK 2 开发包（见 §3.3）。
+
+一次性拉取依赖：
+
+```bash
+go mod download
+```
+
+## 2. TUI 核心（纯 Go —— 所有平台 `CGO_ENABLED=0`）
+
+TUI（`./cmd/contextloom`）是纯 Go 实现，天然支持交叉编译。以下命令格式统一：
+
+```
+CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -ldflags="-s -w" -o dist/contextloom-<os>-<arch>[.exe] ./cmd/contextloom
+```
+
+### 2.1 完整交叉编译矩阵
+
+**macOS**
+
+```bash
+CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-darwin-arm64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-darwin-amd64 ./cmd/contextloom
+```
+
+**Linux —— x86 与 ARM 家族**
+
+```bash
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-linux-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-linux-386     ./cmd/contextloom
+
+# 32 位 ARM：用 GOARM 选择 ARM 版本（5 = ARMv5，6 = ARMv6，7 = ARMv7）
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=5 go build -ldflags="-s -w" -o dist/contextloom-linux-armv5 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o dist/contextloom-linux-armv6 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o dist/contextloom-linux-armv7 ./cmd/contextloom
+```
+
+**Linux —— 其他架构**
+
+```bash
+CGO_ENABLED=0 GOOS=linux   GOARCH=ppc64le  go build -ldflags="-s -w" -o dist/contextloom-linux-ppc64le  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=s390x    go build -ldflags="-s -w" -o dist/contextloom-linux-s390x    ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=riscv64  go build -ldflags="-s -w" -o dist/contextloom-linux-riscv64  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=loong64  go build -ldflags="-s -w" -o dist/contextloom-linux-loong64  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=mips64le go build -ldflags="-s -w" -o dist/contextloom-linux-mips64le ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=mipsle   go build -ldflags="-s -w" -o dist/contextloom-linux-mipsle   ./cmd/contextloom
+```
+
+**Windows**
+
+```bash
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe   ./cmd/contextloom
+```
+
+> ⚠️ **TUI 的 Windows 构建不要加 `-H windowsgui`。** TUI 是**控制台**程序。`-H windowsgui` 会把 PE 切到 GUI 子系统（Subsystem=2），从而脱离控制台、破坏全部终端输入输出。只有 GUI 二进制才用该标志（§3.2）。
+
+**BSD 家族**
+
+```bash
+CGO_ENABLED=0 GOOS=freebsd   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=freebsd   GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-arm64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=netbsd    GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-netbsd-amd64    ./cmd/contextloom
+CGO_ENABLED=0 GOOS=openbsd   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-openbsd-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-dragonfly-amd64 ./cmd/contextloom
+```
+
+**Solaris、AIX、Plan 9**
+
+```bash
+CGO_ENABLED=0 GOOS=solaris GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-solaris-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=aix     GOARCH=ppc64 go build -ldflags="-s -w" -o dist/contextloom-aix-ppc64     ./cmd/contextloom
+CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-plan9-amd64   ./cmd/contextloom
+```
+
+### 2.2 一键批量构建（全部 TUI 目标）
+
+用 shell 循环遍历 `GOOS/GOARCH` 表。`.exe` 后缀仅用于 Windows。
+
+```bash
+#!/usr/bin/env bash
+# build-all-tui.sh —— 把 TUI 构建到 dist/ 下所有受支持目标
+set -euo pipefail
+mkdir -p dist
+
+# "GOOS/GOARCH[/GOARM]" 条目
+targets=(
+  darwin/amd64   darwin/arm64
+  linux/amd64    linux/arm64   linux/386
+  linux/arm/5    linux/arm/6   linux/arm/7
+  linux/ppc64le  linux/s390x   linux/riscv64   linux/loong64
+  linux/mips64le linux/mipsle
+  windows/amd64  windows/arm64 windows/386
+  freebsd/amd64  freebsd/arm64
+  netbsd/amd64   openbsd/amd64 dragonfly/amd64
+  solaris/amd64  aix/ppc64     plan9/amd64
+)
+
+for t in "${targets[@]}"; do
+  IFS='/' read -r os arch arm <<< "$t"
+  out="dist/contextloom-${os}-${arch}"
+  [ "$arch" = "arm" ] && [ -n "${arm:-}" ] && out="dist/contextloom-${os}-armv${arm}"
+  [ "$os" = "windows" ] && out="${out}.exe"
+
+  echo "==> ${os}/${arch}${arm:+/GOARM=$arm} -> ${out}"
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" ${arm:+GOARM="$arm"} \
+    go build -ldflags="-s -w" -o "$out" ./cmd/contextloom
+done
+echo "✅ TUI 构建完成。"
+```
+
+### 2.3 Makefile 封装
+
+```bash
+make build   # 当前平台 TUI 二进制 -> ./contextloom
+make run     # go run ./cmd/contextloom
+make test    # go test -race -cover ./...
+make lint    # golangci-lint run ./...
+make clean   # rm -f contextloom
+```
+
+## 3. GUI 桌面外壳（Wails/WebView —— 需 CGO）
+
+GUI（`./cmd/contextloom-gui`）是 Wails v2 桌面外壳。它**不是**独立应用：启动时会定位 `contextloom` 后端（见 §6），必要时以 headless 方式拉起，然后渲染前端。由于 Wails 绑定平台 WebView，它需要 CGO 与各平台的 C 工具链——无法在目标平台之外（或没有其工具链时）产出 macOS/Linux 的 GUI 二进制。
+
+生产构建标签为 `-tags production`（剥离 Wails 开发服务器）。
+
+### 3.1 macOS（本机构建）
+
+```bash
+# 当前 macOS 架构的 GUI 二进制
+CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+
+# 显式指定架构（在匹配主机上构建，或用 C 交叉工具链）
+CGO_ENABLED=1 GOARCH=arm64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
+CGO_ENABLED=1 GOARCH=amd64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-amd64 ./cmd/contextloom-gui
+
+# 通用二进制（用 lipo 合并两个切片）
+lipo -create -output dist/contextloom-gui-darwin-universal \
+  dist/contextloom-gui-darwin-arm64 dist/contextloom-gui-darwin-amd64
+
+# 打包可双击的 .app -> dist/ContextLoom.app
+make build-gui-macos          # 内部执行 scripts/build-macos-app.sh
+```
+
+`scripts/build-macos-app.sh` 会把 `contextloom` 与 `contextloom-gui` 一起构建进 `dist/ContextLoom.app/Contents/MacOS/`，写入 `Info.plist`，并标记可执行。在 macOS 上，双击**裸**二进制会让 LaunchServices 用 Terminal.app 打开；`.app` 包则以正规 GUI 应用方式启动，无控制台窗口。
+
+### 3.2 Windows（本机或交叉编译——均需 mingw-w64）
+
+```bash
+# Windows 本机（已装 mingw-w64 / MSYS2），amd64：
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+  go build -tags production -ldflags="-s -w -H windowsgui" \
+  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+
+# 从 macOS/Linux 交叉编译同样的产物（先装 mingw-w64）：
+#   Debian/Ubuntu:  sudo apt install gcc-mingw-w64-x86-64
+#   macOS (brew):   brew install mingw-w64
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+  go build -tags production -ldflags="-s -w -H windowsgui" \
+  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+
+# Windows on ARM64（aarch64 mingw-w64）：
+CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
+  go build -tags production -ldflags="-s -w -H windowsgui" \
+  -o dist/contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
+
+# Makefile 捷径（交叉编译 amd64 + PE 校验）：
+make build-gui-win
+```
+
+> ⚠️ **`-H windowsgui` 是生死标志。** Windows GUI 构建漏掉它会产出 console 子系统 exe（PE `Subsystem=3`），双击必弹黑色命令行窗口。该标志由 Go **链接器按目标 `GOOS=windows` 生效**，与构建主机无关——因此从 Linux/macOS 交叉编译时，与在 Windows 本机构建同样必须带。
+>
+> 历史教训：早期 Makefile 用 `ifeq ($(OS),Windows_NT)` 门控该标志，导致交叉编译或裸 `go build` 产出 Windows exe 时该标志被静默丢弃。当前 Makefile 无条件应用 `GUI_LDFLAGS := -H windowsgui`。
+
+### 3.3 Linux（本机构建——需 WebKitGTK 开发库）
+
+```bash
+# 前置依赖 —— Debian / Ubuntu：
+sudo apt update
+sudo apt install libgtk-3-dev libwebkit2gtk-4.0-dev gcc pkg-config
+
+# 前置依赖 —— Fedora / RHEL：
+sudo dnf install gtk3-devel webkit2gtk4.0-devel gcc pkgconf-pkg-config
+
+# 前置依赖 —— Arch：
+sudo pacman -S gtk3 webkit2gtk base-devel pkgconf
+
+# 构建
+CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+```
+
+> 在无显示/无 WebView 的 headless Linux 主机上，GUI 外壳自动回退到**浏览器模式**——启动后端并通过 HTTP 提供 UI，在系统浏览器中打开而非桌面窗口。
+
+### 3.4 PE 子系统校验（防回归）
+
+任何 Windows GUI 构建都应校验：PE `Subsystem` 必须为 **2（GUI）**，而非 3（CONSOLE）。
+
+```bash
+go run ./scripts/pecheck dist/contextloom-gui-windows-amd64.exe        # 期望：subsystem=2(GUI) OK
+go run ./scripts/pecheck dist/contextloom-gui-windows-amd64.exe 2      # 显式期望值
+```
+
+`scripts/pecheck` 直接读取 PE 可选头的 `Subsystem` 字段（偏移 68），不匹配时以非零码退出——因此丢失 `-H windowsgui` 会让构建失败，而不是交付一个会弹出控制台的窗口化应用。
+
+Makefile 自动跑 `pecheck`：
+
+```bash
+make build-gui       # 构建 contextloom-gui（本机）后校验 PE 子系统
+make build-gui-win   # 交叉编译 Windows GUI 后校验 PE 子系统
+make verify-gui      # 校验已产出的 contextloom-gui.exe
+```
+
+## 4. 构建矩阵速查
+
+| 目标 | CGO | 额外依赖 | 关键标志 |
+|---|---|---|---|
+| TUI，任意平台 | `CGO_ENABLED=0` | 无 | `-ldflags="-s -w"` |
+| GUI，macOS（arm64/amd64） | `CGO_ENABLED=1` | Xcode CLT | `-tags production` |
+| GUI，macOS 通用 | `CGO_ENABLED=1` | Xcode CLT + `lipo` | `-tags production` + `lipo -create` |
+| GUI，Windows amd64 | `CGO_ENABLED=1` | mingw-w64（`x86_64-w64-mingw32-gcc`） | `-tags production -ldflags="… -H windowsgui"` |
+| GUI，Windows arm64 | `CGO_ENABLED=1` | aarch64 mingw-w64（`aarch64-w64-mingw32-gcc`） | 同上 |
+| GUI，Linux | `CGO_ENABLED=1` | `libgtk-3-dev`、`libwebkit2gtk-4.0-dev`、`pkg-config` | `-tags production` |
+
+## 5. Makefile 目标速查
+
+| 目标 | 作用 |
+|---|---|
+| `make build` | 构建当前平台 TUI（`./contextloom`）。 |
+| `make run` | `go run ./cmd/contextloom`。 |
+| `make test` | `go test -race -cover ./...`。 |
+| `make lint` | `golangci-lint run ./...`。 |
+| `make clean` | 删除本地 `contextloom` 二进制。 |
+| `make build-gui` | 为本机构建 GUI，然后对产出的 exe 跑 `pecheck`。 |
+| `make build-gui-win` | 交叉编译 Windows GUI（amd64，mingw-w64）+ `pecheck`。 |
+| `make verify-gui` | 对已产出的 `contextloom-gui.exe` 跑 `pecheck`。 |
+| `make build-gui-macos` | 通过 `scripts/build-macos-app.sh` 打包 `dist/ContextLoom.app`。 |
+
+## 6. 运行时布局与环境变量
+
+```
+deploy/
+  contextloom-gui        # GUI 启动器（Wails 桌面外壳）
+  contextloom            # GUI 按需拉起的后端
+  config.yaml            # 可选；从 config.example.yaml 复制
+```
+
+- **同目录：** GUI 优先在自身可执行文件旁查找 `contextloom` 后端（`os.Executable()`），**请把两个二进制放在同一目录**。
+- **`CONTEXTLOOM_BIN`：** 若后端在别处，显式指向它：
+
+  ```bash
+  CONTEXTLOOM_BIN=/opt/contextloom/contextloom ./contextloom-gui
+  ```
+
+  查找顺序为：**同目录 → `CONTEXTLOOM_BIN` → `PATH`**。
+- **headless Linux 回退：** 无显示/WebView 时，外壳通过 HTTP 提供 UI 并打开系统浏览器（或显式用 `--browser` 运行）。
+- **配置查找：** GUI 依次在真实（解析符号链接后）可执行文件旁、CWD、内置默认中解析 `config.yaml`。把 `config.example.yaml` 复制为 `config.yaml` 并填入模型/API Key。
+
+## 7. 常见坑与排错
+
+| 现象 | 原因 | 修复 |
+|---|---|---|
+| 双击 Windows GUI 弹出黑色控制台窗口 | 丢失 `-H windowsgui` → PE `Subsystem=3` | 带 `-H windowsgui` 重新构建；用 `go run ./scripts/pecheck <exe>` 校验（期望 Subsystem=2）。 |
+| `gcc: command not found` / `cgo: C compiler not found` | CGO 关闭或无 C 工具链 | 设 `CGO_ENABLED=1` 并安装 gcc/Clang/mingw-w64。 |
+| `Package webkit2gtk-4.0 was not found`（Linux） | 缺 WebKitGTK 开发头文件 | 安装 `libwebkit2gtk-4.0-dev`（Debian）/ `webkit2gtk4.0-devel`（Fedora）。 |
+| 交叉编译 macOS/Linux GUI 失败 | CGO 交叉编译需匹配的交叉工具链 | 在目标 OS 上构建 GUI，或用正规交叉 C 工具链。只有 **Windows** GUI 能干净交叉编译（经 mingw-w64）。 |
+| 构建后 Windows TUI 无法交互 | 给 TUI 加了 `-H windowsgui` | 去掉——TUI 是控制台程序。 |
+| GUI 启动时找不到 `contextloom` 后端 | 两二进制不在同一目录 | 放到同一目录，或设 `CONTEXTLOOM_BIN`。 |
+| 老主板跑错 ARM 变体 | `GOARM` 不匹配 | ARMv5 用 `GOARM=5`，ARMv6 用 `6`，ARMv7 用 `7`。 |
+| 经符号链接启动后 GUI 读到错误 `config.yaml` | 符号链接解析 | 启动器先解析真实可执行路径；把 `config.yaml` 放在真实二进制旁或 CWD。 |
+
+## 8. Docker 构建示例
+
+仓库未附带 `Dockerfile`，以下为多阶段示例。TUI 阶段只需 Go（纯 Go，`CGO_ENABLED=0`）；GUI 阶段额外需要 WebKitGTK 开发库。
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# ---- 阶段 1：构建 TUI（纯 Go，无 CGO）----
+FROM golang:1.22-bookworm AS tui
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -o /out/contextloom ./cmd/contextloom
+
+# ---- 阶段 2：构建 GUI（需 GTK3 + WebKitGTK）----
+FROM golang:1.22-bookworm AS gui
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgtk-3-dev libwebkit2gtk-4.0-dev gcc pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=1 go build -tags production -ldflags="-s -w" \
+    -o /out/contextloom-gui ./cmd/contextloom-gui
+
+# ---- 阶段 3：运行时（TUI + GUI 启动器）----
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgtk-3-0 libwebkit2gtk-4.0-37 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=tui /out/contextloom       /app/contextloom
+COPY --from=gui /out/contextloom-gui   /app/contextloom-gui
+WORKDIR /app
+# headless 主机回退浏览器模式；TUI 可直接运行：
+#   docker run -it --rm <image> /app/contextloom
+ENTRYPOINT ["/app/contextloom-gui"]
+```
+
+构建与运行：
+
+```bash
+docker build -t contextloom:local .
+docker run -it --rm contextloom:local /app/contextloom   # 改为运行 TUI
+```
+
+## 9. 相关文档
+
+- [../README.zh-CN.md](../README.zh-CN.md) —— 项目总览与精简的"全平台构建"章节。
+- [architecture.md](architecture.md) —— 分层总览、运行时核心、UI 外壳。
+- [toolchain.md](toolchain.md) —— 员工、场景、工具链与质量门禁。
+- [plugins.md](plugins.md) —— 插件文件位置与打包。
+- [build.md](build.md) —— 本页英文版。
+
+## 关键结论
+
+- **TUI**：`CGO_ENABLED=0`，纯 Go，可交叉编译到 §2.1 的所有目标——**切勿**加 `-H windowsgui`。
+- **GUI**：`CGO_ENABLED=1` + `-tags production`；Windows 需 mingw-w64 且必须带 `-H windowsgui`（用 `scripts/pecheck` 校验，Subsystem=2）。
+- **把 `contextloom` 与 `contextloom-gui` 放在同一目录**（或设 `CONTEXTLOOM_BIN`）。
+- **headless Linux** 自动回退浏览器模式。
