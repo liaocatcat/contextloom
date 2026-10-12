@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ContextLoom — 智能编码助手</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/vendor/xterm/xterm.css">
+<link rel="icon" href="/logo.png">
+</head>
+<body>
+<div id="app">
+  <!-- 顶栏 -->
+  <header id="topbar">
+    <div id="brand">
+      <img id="brandLogo" src="/logo.png" alt="ContextLoom" />
+      <span id="brandSub">智能编码助手</span>
+    </div>
+    <div id="modeSwitch">
+      <button class="mode-btn" data-mode="chat" title="对话模式">💬</button>
+      <button class="mode-btn" data-mode="task" title="任务模式">⚡</button>
+      <button class="mode-btn" data-mode="goal" title="目标模式">🎯</button>
+    </div>
+    <!-- Tab 栏（对话区域正上方、模式按钮右侧，对标业界主流桌面编码 Agent）：
+         会话 tab 与打开的文件 tab 都在此切换（文件查看 ↔ 对话窗口） -->
+    <div id="tabBar"></div>
+    <div id="topStatus">
+      <div id="ctxBlock" title="上下文占用">
+        <div id="ctxTrack"><div id="ctxFill"></div></div>
+        <span id="ctxNum">0%</span>
+      </div>
+      <button id="themeToggle" title="切换主题" class="theme-toggle">◐</button>
+      <div id="connDot" title="连接状态"></div>
+    </div>
+  </header>
+
+  <div id="main">
+    <!-- 活动栏 -->
+    <aside id="activityBar">
+      <button class="act-btn active" data-panel="projects" title="项目管理器（项目展开=文件树，点击项目切换根）">🗂</button>
+      <button class="act-btn" data-panel="sessions" title="会话列表">💬</button>
+      <button class="act-btn" data-panel="agent" title="Agent 观察">⊞</button>
+      <button class="act-btn" data-panel="config" title="配置">⚙</button>
+      <button class="act-btn" data-panel="logs" title="日志">📋</button>
+      <button class="act-btn" data-panel="term" title="终端（多窗口命令行）">▸_</button>
+    </aside>
+
+    <!-- 左侧：侧栏（tab 栏已移至顶部对话区域正上方） -->
+    <div id="leftCol">
+      <aside id="sidePanel">
+        <!-- 项目管理器面板（功能第一：项目展开=该项目的完整文件树，合并目录管理器） -->
+        <div id="panelProjects" class="side-panel">
+          <div id="projToolbar">
+            <b>项目管理器</b>
+            <div class="toolbar-actions">
+              <button id="projAdd" class="ghost-btn" title="添加项目（目录选择）">＋ 添加项目</button>
+              <button id="projRefresh" class="ghost-btn" title="刷新">⟳ 刷新</button>
+            </div>
+          </div>
+          <div id="projHint" class="proj-hint">点击项目 → 展开/折叠文件树；当前项目默认展开（可编辑），其他项目只读浏览；切换按钮 → 切换项目根（config.yaml 除外）</div>
+          <div id="projList"></div>
+        </div>
+        <!-- 会话面板 -->
+        <div id="panelSessions" class="side-panel">
+          <div id="sessionToolbar">
+            <b>会话</b>
+            <span id="curProjectLabel" class="cur-project" title="当前项目根（切换项目时此列表随之更新）"></span>
+            <div>
+              <button id="sessionNew" title="新建会话">＋</button>
+              <button id="sessionRefresh" title="刷新">⟳</button>
+            </div>
+          </div>
+          <div id="sessionList"></div>
+        </div>
+        <!-- Agent 观察面板 -->
+        <div id="panelAgent" class="side-panel" style="display:none">
+          <div id="agentHeader"><b>Agent 活动</b><span id="agentStatus"></span></div>
+          <div id="agentTasks"></div>
+          <div id="agentResizer" class="h-resizer" title="拖拽调整任务区高度（双击重置）"></div>
+          <div id="goalPanel">
+            <div id="goalPhase"></div>
+            <div id="goalRound"></div>
+            <div id="goalProgress"><div id="goalBar"></div></div>
+            <div id="goalSteps"></div>
+            <div id="goalDefects"></div>
+            <div id="goalScore"></div>
+          </div>
+        </div>
+        <!-- 配置面板 -->
+        <div id="panelConfig" class="side-panel" style="display:none">
+          <div id="cfgToolbar"><b>配置</b><button id="cfgRefresh" title="刷新">⟳</button></div>
+          <div class="cfg-sec" id="cfgWorkspace">
+            <h4>🧰 工作台配置 <span class="cfg-ws-hint">员工 · 工具链 · 场景 · 门禁——全程鼠标完成，YAML 只是收据</span></h4>
+            <div class="ws-tabs" id="wsTabs">
+              <button class="ws-tab active" data-ws="employees">👷 员工</button>
+              <button class="ws-tab" data-ws="chains">🔗 工具链</button>
+              <button class="ws-tab" data-ws="scenes">🎬 场景</button>
+              <button class="ws-tab" data-ws="gates">🚦 门禁</button>
+            </div>
+            <div id="wsBody"><div class="cfg-empty">加载中…</div></div>
+          </div>
+          <div class="cfg-sec" id="cfgYaml">
+            <h4>⚙ 配置文件设置 <span class="cfg-yaml-path" id="cfgYamlPath" title="config.yaml 路径"></span></h4>
+            <div id="cfgYamlForm"></div>
+            <div class="cfg-yaml-actions">
+              <button id="cfgYamlSave" class="fe-btn">💾 保存设置</button>
+              <button id="cfgYamlReset" class="fe-btn" title="放弃未保存的修改">↺ 重置</button>
+              <span id="cfgYamlHint" class="cfg-yaml-hint"></span>
+            </div>
+          </div>
+          <div class="cfg-sec" id="cfgSkills">
+            <h4>技能</h4><div id="cfgSkillsBody"></div>
+          </div>
+          <div class="cfg-sec" id="cfgPlugins">
+            <h4>插件</h4><div id="cfgPluginsBody"></div>
+          </div>
+          <div class="cfg-sec" id="cfgPaths">
+            <h4>路径</h4><div id="cfgPathsBody"></div>
+          </div>
+        </div>
+        <!-- 日志面板 -->
+        <div id="panelLogs" class="side-panel" style="display:none">
+          <div id="logToolbar"><span>活动日志</span><button id="logClear">清空</button></div>
+          <div id="logList"></div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 拖拽分隔条：侧栏 ↔ 消息区 -->
+    <div id="sideResizer" class="v-resizer" title="拖拽调整侧栏宽度（双击重置）"></div>
+
+    <!-- 消息区 -->
+    <section id="chatArea">
+      <!-- 文件编辑器（仿业界主流桌面编码 Agent：原文/预览双栏 + 同步滚动 + 行号 + 高亮 + 查找替换） -->
+      <div id="fileEditor" class="file-editor" style="display:none">
+        <div class="fe-toolbar">
+          <span class="fe-path"></span>
+          <span class="fe-dirty"></span>
+          <div class="fe-view-group" id="feViewGroup" title="视图模式">
+            <button id="feViewSplit" class="fe-btn fe-view-btn active" title="分栏（原文+预览）">分栏</button>
+            <button id="feViewEdit" class="fe-btn fe-view-btn" title="仅原文">原文</button>
+            <button id="feViewPrev" class="fe-btn fe-view-btn" title="仅预览">预览</button>
+          </div>
+          <div class="fe-find" id="feFindBox" style="display:none">
+            <input id="feFindInput" placeholder="查找…" spellcheck="false" />
+            <span id="feFindCount" class="fe-find-count"></span>
+            <button id="feFindPrev" class="fe-btn fe-find-btn" title="上一个 (Shift+Enter)">↑</button>
+            <button id="feFindNext" class="fe-btn fe-find-btn" title="下一个 (Enter)">↓</button>
+            <input id="feReplaceInput" placeholder="替换为…" spellcheck="false" style="display:none" />
+            <button id="feReplaceBtn" class="fe-btn fe-find-btn" style="display:none">替换</button>
+            <button id="feReplaceAllBtn" class="fe-btn fe-find-btn" style="display:none">全部</button>
+            <button id="feFindClose" class="fe-btn fe-find-btn" title="关闭查找 (Esc)">✕</button>
+          </div>
+          <button id="feSave" class="fe-btn" title="保存 (Cmd/Ctrl+S)">💾 保存</button>
+          <button id="feClose" class="fe-btn" title="关闭">✕ 关闭</button>
+        </div>
+        <div class="fe-body">
+          <div class="fe-edit-col" id="feEditCol">
+            <div class="fe-gutter" id="feGutter" aria-hidden="true"></div>
+            <div class="fe-text-wrap" id="feTextWrap">
+              <div class="fe-highlight" id="feHighlight" aria-hidden="true"></div>
+              <div class="fe-find-layer" id="feFindLayer" aria-hidden="true"></div>
+              <!-- 软换行（默认 soft）：长行自动换行适应窗口宽度，不再横向滚轮；
+                   高亮层/行号 gutter/查找层按渲染行几何对齐（见 app.js feWrapCache） -->
+              <textarea id="feText" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+            </div>
+          </div>
+          <!-- 分栏分隔条：位于原文列与预览列之间（flex 顺序 = 编辑列 → 分隔条 → 预览列） -->
+          <div id="feResizer" class="v-resizer fe-resizer" title="拖拽调整分栏（双击重置）"></div>
+          <div class="fe-preview-col" id="fePreviewCol">
+            <div class="fe-preview-toolbar">
+              <span class="fe-prev-title">📖 预览</span>
+              <div class="fe-toc" id="feToc"></div>
+            </div>
+            <div class="fe-preview" id="fePreview"></div>
+          </div>
+        </div>
+        <div class="fe-status">
+          <span id="fePos">行 1, 列 1</span>
+          <span id="feSize"></span>
+          <span id="feLang"></span>
+          <span id="feMode"></span>
+        </div>
+      </div>
+      <!-- 对话窗口（消息区）：可拖拽调整高度（#chatResizer） -->
+      <div id="msgWrap">
+        <div id="msgList"></div>
+        <button id="scrollDown" title="回到底部">↓</button>
+      </div>
+      <!-- 对话区 ↔ 输入框 拖拽条 -->
+      <div id="chatResizer" class="h-resizer" title="拖拽调整对话区高度（双击重置）"></div>
+      <div id="inputZone">
+        <div id="quickCmds"></div>
+        <div id="inputBox">
+          <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行，/ 命令…"></textarea>
+          <div id="inputActions">
+            <button id="attachBtn" title="上传文件">📎</button>
+            <span id="inputHint">Enter 发送 · Shift+Enter 换行 · Ctrl+L 清屏</span>
+            <button id="sendBtn" title="发送"></button>
+          </div>
+        </div>
+        <div id="attachments"></div>
+      </div>
+      <!-- 终端面板（xterm.js 全功能终端，仿 VS Code / 业界主流桌面编码 Agent）：
+           多终端并行、随时切换、ANSI 全彩渲染、Ctrl+C 原生中断、复制粘贴。
+           位于输入框下方，高度自适应占满剩余空间（拖拽 #chatResizer 调整
+           对话区高度后，终端自动跟随变化，无需独立拖拽条） -->
+      <div id="termPanel" class="term-panel" style="display:none">
+        <div class="term-bar">
+          <span class="term-tabs" id="termTabs"></span>
+          <button id="termNew" class="term-new" title="新建终端">＋</button>
+          <button id="termClose" class="term-new" title="关闭终端（点击左侧 ▸_ 图标重新打开）">✕</button>
+        </div>
+        <div class="term-body" id="termBody"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 状态栏 -->
+  <footer id="statusBar">
+    <span id="modeBadge"></span>
+    <span id="modelInfo"></span>
+    <span id="ctxBlock2"><span id="ctxNum2"></span><span id="ctxDetail"></span></span>
+    <span id="timerBlock"></span>
+    <span id="envInfo"></span>
+  </footer>
+</div>
+
+<div id="toastWrap"></div>
+<div id="fatalBanner" style="display:none"></div>
+<div id="contextMenu" style="display:none"></div>
+
+<script src="/vendor/xterm/xterm.min.js"></script>
+<script src="/vendor/xterm/xterm-addon-fit.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

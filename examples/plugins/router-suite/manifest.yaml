@@ -1,0 +1,48 @@
+# router-suite 示例插件 —— 对标 dsh-routing-suite preset 的思维模式路由
+# 以 ContextLoom 插件体系 v2 三大能力承载 routing-suite 核心机制：
+#   1) route 钩子（三行为带路由 spec/react/mixed/weak + persona 注入 system 区）
+#   2) message 钩子（单任务三锚 + 每轮反稀释近距离引导）
+#   3) 可调用工具（dev_router_status / dev_router_mode 真实注册，模型可调用）
+name: router-suite
+version: "0.2.0"
+stages: [pre, message, route]
+
+# 工具定义：v2 中 tools 由"声明性元数据"升级为"真实注册"。
+# parameters 为完整 JSON Schema（any 类型），script 指向实现脚本（相对插件目录），
+# timeout 覆盖默认 30s。调用时参数 JSON 经 stdin 传入脚本，stdout 原样作为工具结果。
+tools:
+  - name: dev_router_status
+    description: 查询 router-suite 插件自身的运行状态（路由引擎是否在线）
+    parameters:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [running, stopped]
+          description: 期望查询的状态（可选，仅作参数演示）
+      additionalProperties: false
+    script: scripts/router_status.sh
+    timeout: 5
+  - name: dev_router_mode
+    description: 查询/切换思维模式路由的行为带（spec计划者/react执行者/mixed混合/weak模型自分类），切换后 route 钩子优先采用
+    parameters:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [query, set]
+          description: query=查询当前路由模式（默认），set=切换路由模式
+        value:
+          type: string
+          enum: [spec, react, mixed, weak]
+          description: 切换目标行为带（仅 mode=set 时需要）
+      additionalProperties: false
+    script: scripts/router_mode.sh
+    timeout: 5
+
+hooks:
+  # pre 阶段：本示例不提供 pre 脚本（stages 声明参与 pre，无脚本即无行为）
+  message:
+    inject: scripts/inject.sh
+  route:
+    script: scripts/route.sh

@@ -1,0 +1,62 @@
+# minimal-anchor 示例插件 —— 对标 dsh 极简模式（minimal）
+# 
+# dsh 30 轮实验核心发现：模型在 RL 训练时见过最多的分布是"极简 persona + 最少工具"，
+# 首轮提示词决定整场走向（约 10 分差距只来自首轮）；首轮锚定后即使放开全部能力，
+# 轨迹也不可逆。本插件复刻这个"先窄后宽"底层逻辑：
+#
+#   第 1 轮（极简锁定）：
+#     - route 钩子返回 JSON {"prompt":"极简 persona","tool_scope":"core"}
+#       → persona 走训练分布（锚定思维）
+#       → 工具列表收敛到核心 14 个（大量细节工具不暴露，防分心）
+#     - message 钩子返回三锚引导（目标锚/收敛锚/反跑题锚）
+#   第 2 轮起（锚定后释放）：
+#     - route 钩子返回空（不再注入 persona，避免稀释）
+#       → tool_scope 自动复位为"无约束"（全部工具可用）
+#     - message 钩子返回"收敛推进"轻引导（反稀释，防止每轮刷屏）
+#   第 3 轮起：
+#     - route/message 全部为空（零注入，恢复正常体验）
+#
+# 行为带（对标 dsh 三行为带）：
+#   - auto（默认）：第 1 轮极简锚定 → 第 2 轮释放
+#   - standard：全部轮次不锚定（等同无插件）
+#   - full：第 1 轮即全能力（等同无插件）
+#   可用 dev_anchor_mode 工具查询/切换（状态写入 .anchor_state，跨轮持久）
+name: minimal-anchor
+version: "0.1.0"
+stages: [message, route]
+
+tools:
+  - name: dev_anchor_status
+    description: 查询 minimal-anchor 插件的锚定状态（当前轮次/行为带/注入模式）
+    parameters:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [running, stopped]
+          description: 期望查询的状态（可选，仅作参数演示）
+      additionalProperties: false
+    script: tools/anchor_status.sh
+    timeout: 5
+  - name: dev_anchor_mode
+    description: 查询/设置锚定行为带（auto=首轮极简后续释放 / standard=不注入 / full=全能力），route 钩子优先采用
+    parameters:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [query, set]
+          description: query=查询当前锚定模式（默认），set=切换锚定模式
+        value:
+          type: string
+          enum: [auto, standard, full]
+          description: 切换目标模式（仅 mode=set 时需要）
+      additionalProperties: false
+    script: tools/anchor_mode.sh
+    timeout: 5
+
+hooks:
+  message:
+    inject: scripts/inject.sh
+  route:
+    script: scripts/route.sh
