@@ -108,6 +108,26 @@ CGO_ENABLED=0 GOOS=windows GOARCH=386   go build -ldflags="-s -w" -o dist/contex
 > detaches the console and breaks all terminal input/output. Only the GUI binary gets
 > that flag (§3.2).
 
+**Windows native — PowerShell / CMD**
+
+The bash commands above use POSIX-style env prefixes (`VAR=value cmd`), which PowerShell
+and CMD cannot run as-is. Windows-native equivalents:
+
+PowerShell (note the `$env:` syntax — **do not** use `VAR=value go build`, it does not work):
+
+```powershell
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
+```
+
+CMD (env assignment via `set`; forward slashes in the source path also work —
+`./cmd/contextloom` and `.\cmd\contextloom` are both accepted):
+
+```cmd
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
+```
+
 **BSD family**
 
 ```bash
@@ -162,6 +182,40 @@ done
 echo "✅ TUI builds complete."
 ```
 
+**PowerShell equivalent** (same target table; note the `$env:` assignment — **do not** use
+`VAR=value go build`, PowerShell does not support POSIX env prefixes):
+
+```powershell
+# build-all-tui.ps1 — build the TUI for every supported target into dist\
+New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+$targets = @(
+  'darwin/amd64',  'darwin/arm64',
+  'linux/amd64',   'linux/arm64',   'linux/386',
+  'linux/arm/5',   'linux/arm/6',   'linux/arm/7',
+  'linux/ppc64le', 'linux/s390x',   'linux/riscv64', 'linux/loong64',
+  'linux/mips64le','linux/mipsle',
+  'windows/amd64', 'windows/arm64', 'windows/386',
+  'freebsd/amd64', 'freebsd/arm64',
+  'netbsd/amd64',  'openbsd/amd64', 'dragonfly/amd64',
+  'solaris/amd64', 'aix/ppc64',     'plan9/amd64'
+)
+
+foreach ($t in $targets) {
+  $parts = $t -split '/'
+  $goos = $parts[0]; $goarch = $parts[1]
+  $env:CGO_ENABLED = '0'; $env:GOOS = $goos; $env:GOARCH = $goarch
+  if ($parts.Count -ge 3) { $env:GOARM = $parts[2] } else { Remove-Item Env:GOARM -ErrorAction SilentlyContinue }
+  $out = "dist/contextloom-$goos-$goarch"
+  if ($parts.Count -ge 3) { $out += "v" + $parts[2] }
+  if ($goos -eq 'windows') { $out += '.exe' }
+  go build -ldflags="-s -w" -o $out ./cmd/contextloom
+  if ($LASTEXITCODE -ne 0) { throw "build failed for $t" }
+}
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED -ErrorAction SilentlyContinue
+Write-Host "✅ TUI builds complete."
+```
+
 ### 2.3 Makefile wrappers
 
 ```bash
@@ -181,6 +235,12 @@ per-platform C toolchain — you cannot produce a macOS/Linux GUI binary without
 that platform (or with its toolchain).
 
 The production build tag is `-tags production` (strips the Wails dev server).
+
+> 📌 **Shell note:** all commands in this document are written in **bash** syntax (POSIX env
+> prefixes like `CGO_ENABLED=0 GOOS=... go build`, backslash line continuations, bash loops).
+> On Windows you have two options: run the bash versions verbatim inside **WSL / MSYS2 /
+> Git Bash**, or use the **PowerShell / CMD equivalents** provided in §2.1 (Windows TUI),
+> §2.2 (batch loop) and §3.2 (Windows GUI).
 
 ### 3.1 macOS (native build)
 
@@ -252,6 +312,35 @@ CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
 # Makefile shortcut (cross-compile amd64 + PE check):
 make build-gui-win
 ```
+
+**Windows native — PowerShell / CMD**
+
+The bash commands above use POSIX-style env prefixes (`VAR=value cmd`), which PowerShell
+and CMD cannot run as-is. Windows-native equivalents (written as **single lines** to avoid
+line-continuation pitfalls — backtick in PowerShell, `^` in CMD):
+
+PowerShell (note the `$env:` syntax — **do not** use `VAR=value go build`, it does not work):
+
+```powershell
+$env:CGO_ENABLED="1"; $env:CC="x86_64-w64-mingw32-gcc"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -tags production -ldflags="-s -w -H windowsgui" -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+Remove-Item Env:GOOS, Env:GOARCH, Env:CC, Env:CGO_ENABLED
+```
+
+CMD (env assignment via `set`; note `set VAR=value&&` with **no space before `&&` and no
+trailing space after the value** — a trailing space becomes part of the variable value, e.g.
+`CC=x86_64-w64-mingw32-gcc ` breaks the compiler lookup; for readability you can also run
+each `set` on its own line):
+
+```cmd
+set CGO_ENABLED=1&& set CC=x86_64-w64-mingw32-gcc&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o dist/contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
+```
+
+> On a native Windows host, `CC` can usually be omitted (CGO finds `gcc` from mingw-w64/MSYS2
+> on `PATH`); set it explicitly only when cross-compiling or when multiple compilers exist.
+
+If you prefer not to deal with shell differences at all, use **WSL, MSYS2, or Git Bash** and
+copy the bash commands verbatim. All other commands in this document are bash by default.
 
 > ⚠️ **`-H windowsgui` is a make-or-break flag.** A Windows GUI build without it produces a
 > console-subsystem executable (PE `Subsystem=3`); double-clicking it always pops up a black
