@@ -32,7 +32,9 @@ echo "==> [1/4] 构建 contextloom 主程序（backend）"
 go build -ldflags="-s -w" -o "$MACOS/contextloom" ./cmd/contextloom
 
 echo "==> [2/4] 构建 contextloom-gui（Wails 桌面壳，-tags production）"
-CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o "$MACOS/contextloom-gui" ./cmd/contextloom-gui
+# CGO_CFLAGS 关闭 macOS 15+ 下 Wails v2 调用已弃用 setShowsBaselineSeparator:
+# 产生的 -Wdeprecated-declarations 告警（是 warning 非 error，仅为消除噪声）。
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" go build -tags production -ldflags="-s -w" -o "$MACOS/contextloom-gui" ./cmd/contextloom-gui
 
 echo "==> [3/4] 生成 Info.plist"
 mkdir -p "$CONTENTS"

@@ -21,6 +21,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextl
 # GUI — current platform (needs a C toolchain + WebView dev libs):
 CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
+# GUI — macOS 15+ only: add CGO_CFLAGS to silence the harmless Wails deprecation warning (see §3.1):
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
+  go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+
 # GUI — Windows from any host (needs mingw-w64; -H windowsgui is mandatory):
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
@@ -182,11 +186,13 @@ The production build tag is `-tags production` (strips the Wails dev server).
 
 ```bash
 # GUI binary for the current macOS architecture
-CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+# CGO_CFLAGS silences the harmless Wails deprecation warning on macOS 15+ (see the ⚠️ note below)
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
+  go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
 # Explicit architecture (build on the matching host, or with a C cross toolchain)
-CGO_ENABLED=1 GOARCH=arm64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
-CGO_ENABLED=1 GOARCH=amd64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-amd64 ./cmd/contextloom-gui
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" GOARCH=arm64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" GOARCH=amd64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-amd64 ./cmd/contextloom-gui
 
 # Universal binary (merge both slices with lipo)
 lipo -create -output dist/contextloom-gui-darwin-universal \
@@ -195,6 +201,28 @@ lipo -create -output dist/contextloom-gui-darwin-universal \
 # Package a double-clickable .app bundle -> dist/ContextLoom.app
 make build-gui-macos          # runs scripts/build-macos-app.sh
 ```
+
+> ⚠️ **On macOS 15+ the build prints a Wails deprecation warning — it is harmless, not an
+> error.** The output looks like:
+>
+> ```
+> # github.com/wailsapp/wails/v2/internal/frontend/desktop/darwin
+> WailsContext.m:164:18: warning: 'setShowsBaselineSeparator:' is deprecated: first deprecated in macOS 15.0 - No longer supported [-Wdeprecated-declarations]
+> .../NSToolbar.h:299:16: note: property 'showsBaselineSeparator' is declared deprecated here
+> ```
+>
+> This comes from the third-party **Wails v2.9.2** dependency calling an AppKit API that
+> macOS 15.0 deprecated — **not** from ContextLoom. The build still **exits 0** and produces a
+> working binary (verified: it prints `ContextLoom GUI v2.3.0`). Upgrading Wails does **not**
+> remove it: every Wails v2 release through v2.16.0 still calls this API. To silence the
+> warning, add the CGO flag shown in the commands above:
+>
+> ```bash
+> CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
+>   go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+> ```
+>
+> The flag only suppresses the warning; the build still exits 0 and the binary is identical.
 
 `scripts/build-macos-app.sh` builds both `contextloom` and `contextloom-gui` into
 `dist/ContextLoom.app/Contents/MacOS/`, writes `Info.plist`, and marks them executable. On
@@ -233,7 +261,14 @@ make build-gui-win
 >
 > Historical note: an earlier Makefile gated this flag behind `ifeq ($(OS),Windows_NT)`, which
 > silently dropped it whenever the Windows exe was produced by cross-compilation or a plain
-> `go build`. The current Makefile applies `GUI_LDFLAGS := -H windowsgui` unconditionally.
+> `go build`. The current Makefile applies `GUI_LDFLAGS := -H windowsgui` unconditionally in the
+> `build-gui-win` target (the Windows cross-compile path). The host-target `build-gui` target is
+> now host-aware: it only adds the flag when the build host is Windows, and omits it on
+> macOS/Linux (where it would fail the link — see §7).
+>
+> ⚠️ **`-H windowsgui` must ONLY be used for a `GOOS=windows` target.** It is a *Windows-only*
+> linker flag; passing it on a darwin/linux host fails the link (see §7). When building the GUI
+> on macOS or Linux, omit it entirely.
 
 ### 3.3 Linux (native build — WebKitGTK dev libraries required)
 
@@ -297,7 +332,7 @@ make verify-gui      # verifies an already-built contextloom-gui.exe
 | `make test` | `go test -race -cover ./...`. |
 | `make lint` | `golangci-lint run ./...`. |
 | `make clean` | Remove the local `contextloom` binary. |
-| `make build-gui` | Build the GUI for the host, then run `pecheck` on the produced exe. |
+| `make build-gui` | Build the GUI for the host. Host-aware: on a Windows host it adds `-H windowsgui` and runs `pecheck`; on macOS/Linux it omits the flag and skips `pecheck` (non-PE target). |
 | `make build-gui-win` | Cross-compile the Windows GUI (amd64, mingw-w64) + `pecheck`. |
 | `make verify-gui` | Run `pecheck` on an already-built `contextloom-gui.exe`. |
 | `make build-gui-macos` | Package `dist/ContextLoom.app` via `scripts/build-macos-app.sh`. |
@@ -330,6 +365,8 @@ deploy/
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `WailsContext.m:164:18: warning: 'setShowsBaselineSeparator:' is deprecated: first deprecated in macOS 15.0` when building the GUI on macOS 15+ | The third-party Wails v2 dependency (v2.9.2) calls an AppKit API deprecated in macOS 15.0 — a **warning, not an error**; the build still exits 0 and produces a working binary | Harmless — ignore it. To silence it, rebuild with `CGO_CFLAGS="-Wno-deprecated-declarations"`. Upgrading Wails does not remove it (every v2 release through v2.16.0 still calls this API). |
+| `make build-gui` fails on macOS/Linux with `libc_*: initialize bounds (0 < 8)` … `link: too many errors` | `-H windowsgui` was applied unconditionally, but that linker flag is only valid for a `GOOS=windows` target, so the darwin/linux link fails | Build the GUI **without** `-H windowsgui` on macOS/Linux — it is Windows-only (it sets PE `Subsystem=2`). Only pass it when `GOOS=windows`. |
 | Double-clicking the Windows GUI pops a black console window | `-H windowsgui` was dropped → PE `Subsystem=3` | Rebuild with `-H windowsgui`; verify with `go run ./scripts/pecheck <exe>` (expect Subsystem=2). |
 | `gcc: command not found` / `cgo: C compiler not found` | CGO disabled or no C toolchain | Set `CGO_ENABLED=1` and install gcc/Clang/mingw-w64. |
 | `Package webkit2gtk-4.0 was not found` (Linux) | WebKitGTK dev headers missing | Install `libwebkit2gtk-4.0-dev` (Debian) / `webkit2gtk4.0-devel` (Fedora). |
@@ -400,6 +437,7 @@ docker run -it --rm contextloom:local /app/contextloom   # run the TUI instead
 ## Key Takeaways
 
 - **TUI**: `CGO_ENABLED=0`, pure Go, cross-compiles to every target in §2.1 — never add `-H windowsgui`.
-- **GUI**: `CGO_ENABLED=1` + `-tags production`; Windows needs mingw-w64 and the mandatory `-H windowsgui` (verify with `scripts/pecheck`, Subsystem=2).
+- **GUI**: `CGO_ENABLED=1` + `-tags production`; Windows needs mingw-w64 and the mandatory `-H windowsgui` (verify with `scripts/pecheck`, Subsystem=2) — but **never** pass `-H windowsgui` on macOS/Linux.
+- **macOS 15+**: the Wails `setShowsBaselineSeparator:` deprecation warning is harmless; silence it with `CGO_CFLAGS="-Wno-deprecated-declarations"`.
 - **Keep `contextloom` and `contextloom-gui` in the same directory** (or set `CONTEXTLOOM_BIN`).
 - **Headless Linux** falls back to browser mode automatically.

@@ -17,7 +17,9 @@ make build
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64 ./cmd/contextloom
 
 # GUI —— 当前平台（需 C 工具链 + WebView 开发库）：
-CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+# macOS 15+ 建议带 CGO_CFLAGS 屏蔽 Wails 的弃用告警（无害，见 §3.1）：
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
+  go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
 # GUI —— 从任意主机交叉编译 Windows（需 mingw-w64；-H windowsgui 必带）：
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
@@ -172,7 +174,9 @@ GUI（`./cmd/contextloom-gui`）是 Wails v2 桌面外壳。它**不是**独立�
 
 ```bash
 # 当前 macOS 架构的 GUI 二进制
-CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+# CGO_CFLAGS 仅用于屏蔽 Wails 的弃用告警（无害，见下方 ⚠️）：
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
+  go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
 # 显式指定架构（在匹配主机上构建，或用 C 交叉工具链）
 CGO_ENABLED=1 GOARCH=arm64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
@@ -185,6 +189,20 @@ lipo -create -output dist/contextloom-gui-darwin-universal \
 # 打包可双击的 .app -> dist/ContextLoom.app
 make build-gui-macos          # 内部执行 scripts/build-macos-app.sh
 ```
+
+> ⚠️ **macOS 15+ 的弃用告警无害，别当报错。** 在 macOS 15 及以上（实测宿主 macOS 27.0 + Xcode CLT）构建 GUI 时，会打印：
+>
+> ```
+> WailsContext.m:164:18: warning: 'setShowsBaselineSeparator:' is deprecated:
+> first deprecated in macOS 15.0 - No longer supported [-Wdeprecated-declarations]
+> ```
+>
+> 这是第三方依赖 **Wails v2.9.2** 调用了 macOS 15 起弃用的 AppKit API 所产生的**警告（warning）**，不是错误：构建仍 `exit 0` 并产出可用二进制（实测输出版本号 ContextLoom GUI v2.3.0）。**所有 Wails v2 版本（含 v2.16.0）都仍调用该 API，升级 Wails 无法消除。** 如需让日志清爽，加 `CGO_CFLAGS` 关闭该类告警即可（已验证构建仍成功、告警消失）：
+>
+> ```bash
+> CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
+>   go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+> ```
 
 `scripts/build-macos-app.sh` 会把 `contextloom` 与 `contextloom-gui` 一起构建进 `dist/ContextLoom.app/Contents/MacOS/`，写入 `Info.plist`，并标记可执行。在 macOS 上，双击**裸**二进制会让 LaunchServices 用 Terminal.app 打开；`.app` 包则以正规 GUI 应用方式启动，无控制台窗口。
 
@@ -214,7 +232,9 @@ make build-gui-win
 
 > ⚠️ **`-H windowsgui` 是生死标志。** Windows GUI 构建漏掉它会产出 console 子系统 exe（PE `Subsystem=3`），双击必弹黑色命令行窗口。该标志由 Go **链接器按目标 `GOOS=windows` 生效**，与构建主机无关——因此从 Linux/macOS 交叉编译时，与在 Windows 本机构建同样必须带。
 >
-> 历史教训：早期 Makefile 用 `ifeq ($(OS),Windows_NT)` 门控该标志，导致交叉编译或裸 `go build` 产出 Windows exe 时该标志被静默丢弃。当前 Makefile 无条件应用 `GUI_LDFLAGS := -H windowsgui`。
+> 反过来说，**在 macOS/Linux 宿主上构建 GUI 时不要加 `-H windowsgui`**——它只对 `GOOS=windows` 有效，加到 darwin 目标上会导致链接失败（详见 §7 排错表）。
+>
+> 历史教训：早期 Makefile 用 `ifeq ($(OS),Windows_NT)` 门控该标志，导致交叉编译或裸 `go build` 产出 Windows exe 时该标志被静默丢弃。当前 Makefile 在 `build-gui-win`（Windows 交叉编译路径）无条件应用 `GUI_LDFLAGS := -H windowsgui`；而宿主目标 `build-gui` 已改为宿主感知——仅当构建宿主为 Windows 时才加该标志，macOS/Linux 宿主不加（否则链接失败，详见 §7）。
 
 ### 3.3 Linux（本机构建——需 WebKitGTK 开发库）
 
@@ -259,7 +279,7 @@ make verify-gui      # 校验已产出的 contextloom-gui.exe
 | 目标 | CGO | 额外依赖 | 关键标志 |
 |---|---|---|---|
 | TUI，任意平台 | `CGO_ENABLED=0` | 无 | `-ldflags="-s -w"` |
-| GUI，macOS（arm64/amd64） | `CGO_ENABLED=1` | Xcode CLT | `-tags production` |
+| GUI，macOS（arm64/amd64） | `CGO_ENABLED=1` | Xcode CLT | `-tags production`（可选 `CGO_CFLAGS="-Wno-deprecated-declarations"` 屏蔽弃用告警） |
 | GUI，macOS 通用 | `CGO_ENABLED=1` | Xcode CLT + `lipo` | `-tags production` + `lipo -create` |
 | GUI，Windows amd64 | `CGO_ENABLED=1` | mingw-w64（`x86_64-w64-mingw32-gcc`） | `-tags production -ldflags="… -H windowsgui"` |
 | GUI，Windows arm64 | `CGO_ENABLED=1` | aarch64 mingw-w64（`aarch64-w64-mingw32-gcc`） | 同上 |
@@ -274,7 +294,7 @@ make verify-gui      # 校验已产出的 contextloom-gui.exe
 | `make test` | `go test -race -cover ./...`。 |
 | `make lint` | `golangci-lint run ./...`。 |
 | `make clean` | 删除本地 `contextloom` 二进制。 |
-| `make build-gui` | 为本机构建 GUI，然后对产出的 exe 跑 `pecheck`。 |
+| `make build-gui` | 为本机构建 GUI。宿主感知：Windows 宿主会加 `-H windowsgui` 并跑 `pecheck`；macOS/Linux 宿主不加该标志且跳过 `pecheck`（非 PE 目标）。 |
 | `make build-gui-win` | 交叉编译 Windows GUI（amd64，mingw-w64）+ `pecheck`。 |
 | `make verify-gui` | 对已产出的 `contextloom-gui.exe` 跑 `pecheck`。 |
 | `make build-gui-macos` | 通过 `scripts/build-macos-app.sh` 打包 `dist/ContextLoom.app`。 |
@@ -311,6 +331,8 @@ deploy/
 | GUI 启动时找不到 `contextloom` 后端 | 两二进制不在同一目录 | 放到同一目录，或设 `CONTEXTLOOM_BIN`。 |
 | 老主板跑错 ARM 变体 | `GOARM` 不匹配 | ARMv5 用 `GOARM=5`，ARMv6 用 `6`，ARMv7 用 `7`。 |
 | 经符号链接启动后 GUI 读到错误 `config.yaml` | 符号链接解析 | 启动器先解析真实可执行路径；把 `config.yaml` 放在真实二进制旁或 CWD。 |
+| macOS 15+ 构建 GUI 打印 `setShowsBaselineSeparator:` is deprecated 警告 | 第三方依赖 Wails v2 调用了 macOS 15 起弃用的 AppKit API；**属警告非错误**，构建仍 exit 0 并产出可用二进制（所有 Wails v2 版本均如此，升级无法消除） | 无需处理；如需日志清爽，加 `CGO_CFLAGS="-Wno-deprecated-declarations"` 重新构建即可屏蔽该告警。 |
+| `make build-gui` 在 macOS/Linux 宿主上链接失败（`libc_*: initialize bounds (0 < 8)` … `link: too many errors`） | Makefile 无条件加了 `-H windowsgui`，而该链接标志**仅对目标 `GOOS=windows` 有效**；在 darwin 宿主上用它链接失败 | macOS/Linux 宿主构建 GUI **不要**加 `-H windowsgui`（该标志只用于 Windows GUI 构建，见 §3.2）；直接用 §3.1 的 `go build` 命令或 `make build-gui-macos`。 |
 
 ## 8. Docker 构建示例
 
@@ -371,6 +393,7 @@ docker run -it --rm contextloom:local /app/contextloom   # 改为运行 TUI
 ## 关键结论
 
 - **TUI**：`CGO_ENABLED=0`，纯 Go，可交叉编译到 §2.1 的所有目标——**切勿**加 `-H windowsgui`。
-- **GUI**：`CGO_ENABLED=1` + `-tags production`；Windows 需 mingw-w64 且必须带 `-H windowsgui`（用 `scripts/pecheck` 校验，Subsystem=2）。
+- **GUI**：`CGO_ENABLED=1` + `-tags production`；Windows 需 mingw-w64 且必须带 `-H windowsgui`（用 `scripts/pecheck` 校验，Subsystem=2）；macOS/Linux 宿主构建**不要**加 `-H windowsgui`。
+- **macOS 15+ 的 `setShowsBaselineSeparator:` 弃用告警无害**（Wails v2 固有，非错误），可用 `CGO_CFLAGS="-Wno-deprecated-declarations"` 屏蔽。
 - **把 `contextloom` 与 `contextloom-gui` 放在同一目录**（或设 `CONTEXTLOOM_BIN`）。
 - **headless Linux** 自动回退浏览器模式。
