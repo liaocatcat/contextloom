@@ -188,22 +188,20 @@ make build-gui-macos        # 内部执行 scripts/build-macos-app.sh
 
 > ⚠️ **macOS 15+ 的 `setShowsBaselineSeparator:` 弃用告警无害，别当报错。** 这是第三方依赖 Wails v2 调用已弃用 AppKit API 的**警告（warning）**，构建仍成功并产出可用二进制；所有 Wails v2 版本（含 v2.16.0）均如此，升级无法消除。如需日志清爽，加一行 `CGO_CFLAGS="-Wno-deprecated-declarations"` 重新构建即可（已验证构建仍成功、告警消失）。
 
-#### Windows（本机或交叉编译均需 mingw-w64）
+#### Windows（无需 C 工具链——纯 Go COM 绑定）
+
+Wails v2 的 Windows 后端是**纯 Go** 实现（`wailsapp/go-webview2`，COM 绑定），模块里带
+`import "C"` 的文件全部是 `*_darwin.go`。因此 Windows GUI 在**任意宿主**上以
+`CGO_ENABLED=0` 即可交叉编译——**不需要 mingw-w64**（此前文档称需要，是误传）。
 
 ```bash
-# 本机（Windows 上装了 mingw-w64 或 MSYS2）
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+# Windows amd64 —— 任意宿主，无需 mingw
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
-# 从 macOS/Linux 交叉编译 Windows GUI
-# 前置：apt/brew 安装 mingw-w64（提供 x86_64-w64-mingw32-gcc）
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
-
-# Windows on ARM
-CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
+# Windows on ARM64
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 ```
@@ -226,7 +224,7 @@ CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
 > 💡 **PowerShell 等价命令（Windows 本机，amd64）**——bash 的 `VAR=x` 前缀与 `\` 续行在 PowerShell/CMD 中不可用：
 >
 > ```powershell
-> $env:CGO_ENABLED="1"; $env:GOOS="windows"; $env:GOARCH="amd64"
+> $env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
 > go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 > Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 > ```
@@ -253,9 +251,43 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 |---|---|---|---|
 | TUI 任意平台 | `CGO_ENABLED=0` | 无 | `-ldflags="-s -w"` |
 | GUI macOS | `CGO_ENABLED=1` | Xcode CLT | `-tags production`（可选 `CGO_CFLAGS="-Wno-deprecated-declarations"` 屏蔽弃用告警） |
-| GUI Windows amd64 | `CGO_ENABLED=1` | mingw-w64 | `-tags production -ldflags="… -H windowsgui"` |
-| GUI Windows arm64 | `CGO_ENABLED=1` | aarch64 mingw-w64 | 同上 |
+| GUI Windows amd64 | `CGO_ENABLED=0` | **无** | `-tags production -ldflags="… -H windowsgui"` |
+| GUI Windows arm64 | `CGO_ENABLED=0` | **无** | 同上 |
 | GUI Linux | `CGO_ENABLED=1` | WebKitGTK 开发库 + gcc | `-tags production` |
+
+## 下载安装（预编译二进制）
+
+每个 [Release](https://github.com/liaocatcat/contextloom/releases) 都附带了全平台预编译产物
+（[Gitee 同步镜像](https://gitee.com/liao-yexian-my/contextloom/releases)），**无需安装 Go 工具链**。
+
+**怎么选文件：** `contextloom-<os>-<arch>[.exe]` 是 **TUI**（终端）版；
+`contextloom-gui-<os>-<arch>[.exe]` 是 **GUI**（桌面窗口）版。
+
+| 平台 | TUI | GUI |
+|---|---|---|
+| macOS（Apple Silicon） | `contextloom-darwin-arm64` | `contextloom-gui-darwin-arm64` |
+| macOS（Intel） | `contextloom-darwin-amd64` | `contextloom-gui-darwin-amd64` |
+| Windows x64 | `contextloom-windows-amd64.exe` | `contextloom-gui-windows-amd64.exe` |
+| Windows arm64 | `contextloom-windows-arm64.exe` | `contextloom-gui-windows-arm64.exe` |
+| Windows 32 位 | `contextloom-windows-386.exe` | — |
+| Linux x86-64 | `contextloom-linux-amd64` | 需从源码构建（WebKitGTK） |
+| Linux arm64 / 386 / armv5-7 | `contextloom-linux-arm64` 等 | — |
+| Linux ppc64le / s390x / riscv64 / loong64 / mips* | `contextloom-linux-<arch>` | — |
+| FreeBSD / NetBSD / OpenBSD / DragonFly | `contextloom-<os>-amd64` | — |
+| Solaris / AIX | `contextloom-solaris-amd64`、`contextloom-aix-ppc64` | — |
+
+> **GUI 必须与后端放在一起。** 把 `contextloom-gui` 与 `contextloom` 放在**同一目录**
+> （GUI 通过 `os.Executable()` 定位后端），或用 `CONTEXTLOOM_BIN=/path/to/contextloom` 指定。
+> Windows GUI 是 GUI 子系统 exe，双击启动**不会弹出黑窗**。
+
+```bash
+# macOS / Linux（TUI）：下载 → 加执行权限 → 运行
+chmod +x contextloom-linux-amd64 && ./contextloom-linux-amd64 --version
+```
+
+> **Linux GUI 是唯一不预编译的目标**：Wails 绑定系统 WebView，便携的 Linux GUI 二进制无法
+> 兼顾各发行版 GTK3/WebKitGTK 版本差异。请用 `-tags production` 从源码构建（见「GUI 桌面外壳」）——
+> 无显示环境下会自动降级为浏览器模式。
 
 ## 快速开始
 

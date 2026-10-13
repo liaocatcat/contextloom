@@ -25,8 +25,8 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
   go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
-# GUI — Windows from any host (needs mingw-w64; -H windowsgui is mandatory):
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+# GUI — Windows from any host (no C toolchain needed; -H windowsgui is mandatory):
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 ```
@@ -36,7 +36,7 @@ Two build units, two rules:
 | Unit | Source | CGO | Cross-compiles? |
 |---|---|---|---|
 | TUI `contextloom` | `./cmd/contextloom` | **off** (`CGO_ENABLED=0`) | Yes, to every Go target |
-| GUI `contextloom-gui` | `./cmd/contextloom-gui` | **on** (`CGO_ENABLED=1`) | Only with a matching cross C toolchain (mingw-w64 for Windows) |
+| GUI `contextloom-gui` | `./cmd/contextloom-gui` | **on** (`CGO_ENABLED=1`) on macOS/Linux; **off** on Windows | macOS/Linux: only with a matching cross C toolchain. Windows: pure-Go COM binding, cross-compiles from any host |
 
 ## 1. Prerequisites
 
@@ -44,7 +44,7 @@ Two build units, two rules:
 - **TUI**: nothing else. Pure Go, no C toolchain, no system libraries.
 - **GUI**: a C compiler plus the platform WebView headers:
   - macOS: Xcode Command Line Tools (`xcode-select --install`).
-  - Windows: mingw-w64 (native, or for cross-compiling from macOS/Linux).
+  - Windows: **nothing** — the Windows GUI is pure Go (COM binding), no C toolchain and no mingw-w64.
   - Linux: GTK 3 + WebKitGTK 2 dev packages (see §3.3).
 
 Fetch dependencies once:
@@ -138,13 +138,17 @@ CGO_ENABLED=0 GOOS=openbsd   GOARCH=amd64 go build -ldflags="-s -w" -o contextlo
 CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-dragonfly-amd64 ./cmd/contextloom
 ```
 
-**Solaris, AIX, Plan 9**
+**Solaris, AIX**
 
 ```bash
 CGO_ENABLED=0 GOOS=solaris GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-solaris-amd64 ./cmd/contextloom
 CGO_ENABLED=0 GOOS=aix     GOARCH=ppc64 go build -ldflags="-s -w" -o contextloom-aix-ppc64     ./cmd/contextloom
-CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-plan9-amd64   ./cmd/contextloom
 ```
+
+> ⚠️ **Plan 9 is not supported.** The upstream terminal dependency
+> (`github.com/charmbracelet/x/term`) ships no plan9 implementation, so the TUI fails to link
+> with `undefined: state / isTerminal / makeRaw / getState`. There is no fix short of swapping
+> the terminal layer, so plan9 is deliberately excluded from the build matrix.
 
 ### 2.2 One-shot batch build (all TUI targets)
 
@@ -165,7 +169,7 @@ targets=(
   windows/amd64  windows/arm64 windows/386
   freebsd/amd64  freebsd/arm64
   netbsd/amd64   openbsd/amd64 dragonfly/amd64
-  solaris/amd64  aix/ppc64     plan9/amd64
+  solaris/amd64  aix/ppc64
 )
 
 for t in "${targets[@]}"; do
@@ -196,7 +200,7 @@ $targets = @(
   'windows/amd64', 'windows/arm64', 'windows/386',
   'freebsd/amd64', 'freebsd/arm64',
   'netbsd/amd64',  'openbsd/amd64', 'dragonfly/amd64',
-  'solaris/amd64', 'aix/ppc64',     'plan9/amd64'
+  'solaris/amd64', 'aix/ppc64'
 )
 
 foreach ($t in $targets) {
@@ -271,7 +275,7 @@ make build-gui-macos          # runs scripts/build-macos-app.sh
 >
 > This comes from the third-party **Wails v2.9.2** dependency calling an AppKit API that
 > macOS 15.0 deprecated — **not** from ContextLoom. The build still **exits 0** and produces a
-> working binary (verified: it prints `ContextLoom GUI v2.3.0`). Upgrading Wails does **not**
+> working binary (verified: it prints `ContextLoom GUI v2.4.0`). Upgrading Wails does **not**
 > remove it: every Wails v2 release through v2.16.0 still calls this API. To silence the
 > warning, add the CGO flag shown in the commands above:
 >
@@ -287,23 +291,23 @@ make build-gui-macos          # runs scripts/build-macos-app.sh
 macOS, double-clicking a **bare** binary makes LaunchServices open it with Terminal.app; the
 `.app` bundle launches it as a proper GUI app with no console window.
 
-### 3.2 Windows (native, or cross-compiled — both need mingw-w64)
+### 3.2 Windows (no C toolchain needed — pure-Go COM binding)
+
+**mingw-w64 is not required.** Wails v2's Windows backend is pure Go
+(`wailsapp/go-webview2`, a COM binding to the WebView2 runtime); every `import "C"` file in
+the module is a `*_darwin.go`. So the Windows GUI builds with `CGO_ENABLED=0` from **any**
+host — Windows, macOS, or Linux — with no cross C toolchain at all. (Earlier revisions of
+this page claimed mingw-w64 was mandatory; that was wrong — verified by building with a bogus
+`CC`, which still succeeds, proving no C compiler is invoked.)
 
 ```bash
-# Native on Windows (mingw-w64 / MSYS2 installed), amd64:
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+# Windows amd64 — from any host, no mingw needed:
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
-# Cross-compile the same from macOS/Linux (install mingw-w64 first):
-#   Debian/Ubuntu:  sudo apt install gcc-mingw-w64-x86-64
-#   macOS (brew):   brew install mingw-w64
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
-
-# Windows on ARM64 (aarch64 mingw-w64):
-CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
+# Windows on ARM64 — same, no aarch64 mingw needed:
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 
@@ -320,22 +324,17 @@ line-continuation pitfalls — backtick in PowerShell, `^` in CMD):
 PowerShell (note the `$env:` syntax — **do not** use `VAR=value go build`, it does not work):
 
 ```powershell
-$env:CGO_ENABLED="1"; $env:CC="x86_64-w64-mingw32-gcc"; $env:GOOS="windows"; $env:GOARCH="amd64"
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
 go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
-Remove-Item Env:GOOS, Env:GOARCH, Env:CC, Env:CGO_ENABLED
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 ```
 
 CMD (env assignment via `set`; note `set VAR=value&&` with **no space before `&&` and no
-trailing space after the value** — a trailing space becomes part of the variable value, e.g.
-`CC=x86_64-w64-mingw32-gcc ` breaks the compiler lookup; for readability you can also run
-each `set` on its own line):
+trailing space after the value** — a trailing space becomes part of the variable value):
 
 ```cmd
-set CGO_ENABLED=1&& set CC=x86_64-w64-mingw32-gcc&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
 ```
-
-> On a native Windows host, `CC` can usually be omitted (CGO finds `gcc` from mingw-w64/MSYS2
-> on `PATH`); set it explicitly only when cross-compiling or when multiple compilers exist.
 
 If you prefer not to deal with shell differences at all, use **WSL, MSYS2, or Git Bash** and
 copy the bash commands verbatim. All other commands in this document are bash by default.
@@ -406,8 +405,8 @@ make verify-gui      # verifies an already-built contextloom-gui.exe
 | TUI, any platform | `CGO_ENABLED=0` | none | `-ldflags="-s -w"` |
 | GUI, macOS (arm64/amd64) | `CGO_ENABLED=1` | Xcode CLT | `-tags production` |
 | GUI, macOS universal | `CGO_ENABLED=1` | Xcode CLT + `lipo` | `-tags production` + `lipo -create` |
-| GUI, Windows amd64 | `CGO_ENABLED=1` | mingw-w64 (`x86_64-w64-mingw32-gcc`) | `-tags production -ldflags="… -H windowsgui"` |
-| GUI, Windows arm64 | `CGO_ENABLED=1` | aarch64 mingw-w64 (`aarch64-w64-mingw32-gcc`) | same as above |
+| GUI, Windows amd64 | `CGO_ENABLED=0` | **none** | `-tags production -ldflags="… -H windowsgui"` |
+| GUI, Windows arm64 | `CGO_ENABLED=0` | **none** | same as above |
 | GUI, Linux | `CGO_ENABLED=1` | `libgtk-3-dev`, `libwebkit2gtk-4.0-dev`, `pkg-config` | `-tags production` |
 
 ## 5. Makefile Targets Cheat Sheet
@@ -420,7 +419,7 @@ make verify-gui      # verifies an already-built contextloom-gui.exe
 | `make lint` | `golangci-lint run ./...`. |
 | `make clean` | Remove the local `contextloom` binary. |
 | `make build-gui` | Build the GUI for the host. Host-aware: on a Windows host it adds `-H windowsgui` and runs `pecheck`; on macOS/Linux it omits the flag and skips `pecheck` (non-PE target). |
-| `make build-gui-win` | Cross-compile the Windows GUI (amd64, mingw-w64) + `pecheck`. |
+| `make build-gui-win` | Cross-compile the Windows GUI (amd64, pure Go — no mingw) + `pecheck`. |
 | `make verify-gui` | Run `pecheck` on an already-built `contextloom-gui.exe`. |
 | `make build-gui-macos` | Package `./ContextLoom.app` via `scripts/build-macos-app.sh`. |
 
@@ -457,7 +456,7 @@ deploy/
 | Double-clicking the Windows GUI pops a black console window | `-H windowsgui` was dropped → PE `Subsystem=3` | Rebuild with `-H windowsgui`; verify with `go run ./scripts/pecheck <exe>` (expect Subsystem=2). |
 | `gcc: command not found` / `cgo: C compiler not found` | CGO disabled or no C toolchain | Set `CGO_ENABLED=1` and install gcc/Clang/mingw-w64. |
 | `Package webkit2gtk-4.0 was not found` (Linux) | WebKitGTK dev headers missing | Install `libwebkit2gtk-4.0-dev` (Debian) / `webkit2gtk4.0-devel` (Fedora). |
-| Cross-compiling the GUI for macOS/Linux fails | CGO cross-compilation needs a matching cross toolchain | Build the GUI on its target OS, or use a proper cross C toolchain. Only the **Windows** GUI cross-compiles cleanly (via mingw-w64). |
+| Cross-compiling the GUI for macOS/Linux fails | CGO cross-compilation needs a matching cross toolchain | Build the GUI on its target OS, or use a proper cross C toolchain. The **Windows** GUI needs no C toolchain at all (`CGO_ENABLED=0`). |
 | TUI won't interact on Windows after building | `-H windowsgui` was added to the TUI | Remove it — the TUI is a console program. |
 | `contextloom` backend not found at GUI launch | Binaries are in different directories | Put both in the same directory, or set `CONTEXTLOOM_BIN`. |
 | Wrong ARM variant runs on an old board | `GOARM` mismatch | Use `GOARM=5` for ARMv5, `6` for ARMv6, `7` for ARMv7. |
@@ -524,7 +523,7 @@ docker run -it --rm contextloom:local /app/contextloom   # run the TUI instead
 ## Key Takeaways
 
 - **TUI**: `CGO_ENABLED=0`, pure Go, cross-compiles to every target in §2.1 — never add `-H windowsgui`.
-- **GUI**: `CGO_ENABLED=1` + `-tags production`; Windows needs mingw-w64 and the mandatory `-H windowsgui` (verify with `scripts/pecheck`, Subsystem=2) — but **never** pass `-H windowsgui` on macOS/Linux.
+- **GUI**: `CGO_ENABLED=1` + `-tags production` on macOS/Linux; on Windows `CGO_ENABLED=0` suffices (pure-Go COM binding, no mingw). `-H windowsgui` is mandatory for Windows (verify with `scripts/pecheck`, Subsystem=2) — but **never** pass it on macOS/Linux.
 - **macOS 15+**: the Wails `setShowsBaselineSeparator:` deprecation warning is harmless; silence it with `CGO_CFLAGS="-Wno-deprecated-declarations"`.
 - **Keep `contextloom` and `contextloom-gui` in the same directory** (or set `CONTEXTLOOM_BIN`).
 - **Headless Linux** falls back to browser mode automatically.

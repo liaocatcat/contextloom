@@ -190,22 +190,21 @@ make build-gui-macos        # runs scripts/build-macos-app.sh internally
 > CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 > ```
 
-#### Windows (native or cross-compiled — both need mingw-w64)
+#### Windows (no C toolchain needed — pure-Go COM binding)
+
+Wails v2's Windows backend is **pure Go** (`wailsapp/go-webview2`, COM binding); the module's
+`import "C"` files are all `*_darwin.go`. So the Windows GUI cross-compiles with
+`CGO_ENABLED=0` from **any** host — **mingw-w64 is not required** (earlier docs claimed it was;
+that was wrong).
 
 ```bash
-# Native (mingw-w64 or MSYS2 installed on Windows)
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+# Windows amd64 — from any host, no mingw needed
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
-# Cross-compile the Windows GUI from macOS/Linux
-# Prerequisite: install mingw-w64 via apt/brew (provides x86_64-w64-mingw32-gcc)
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
-
-# Windows on ARM
-CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
+# Windows on ARM64
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 ```
@@ -218,9 +217,9 @@ as-is. PowerShell equivalent (single line, `$env:` assignment — **do not** use
 `VAR=value go build`):
 
 ```powershell
-$env:CGO_ENABLED="1"; $env:CC="x86_64-w64-mingw32-gcc"; $env:GOOS="windows"; $env:GOARCH="amd64"
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
 go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
-Remove-Item Env:GOOS, Env:GOARCH, Env:CC, Env:CGO_ENABLED
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 ```
 
 The full matrix (arm64, CMD variants, batch loop) is in [docs/build.md §2.1 / §2.2 / §3.2](docs/build.md#21-full-cross-compile-matrix).
@@ -262,9 +261,46 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 |---|---|---|---|
 | TUI, any platform | `CGO_ENABLED=0` | none | `-ldflags="-s -w"` |
 | GUI macOS | `CGO_ENABLED=1` | Xcode CLT | `-tags production` |
-| GUI Windows amd64 | `CGO_ENABLED=1` | mingw-w64 | `-tags production -ldflags="… -H windowsgui"` |
-| GUI Windows arm64 | `CGO_ENABLED=1` | aarch64 mingw-w64 | same as above |
+| GUI Windows amd64 | `CGO_ENABLED=0` | **none** | `-tags production -ldflags="… -H windowsgui"` |
+| GUI Windows arm64 | `CGO_ENABLED=0` | **none** | same as above |
 | GUI Linux | `CGO_ENABLED=1` | WebKitGTK dev libs + gcc | `-tags production` |
+
+## Download & Install (Prebuilt Binaries)
+
+Prebuilt binaries for every supported platform are attached to each
+[release](https://github.com/liaocatcat/contextloom/releases) (also mirrored on
+[Gitee](https://gitee.com/liao-yexian-my/contextloom/releases)). No Go toolchain required.
+
+**Pick your file:** `contextloom-<os>-<arch>[.exe]` is the **TUI** (terminal) build;
+`contextloom-gui-<os>-<arch>[.exe]` is the **GUI** (desktop window) build.
+
+| Platform | TUI | GUI |
+|---|---|---|
+| macOS (Apple Silicon) | `contextloom-darwin-arm64` | `contextloom-gui-darwin-arm64` |
+| macOS (Intel) | `contextloom-darwin-amd64` | `contextloom-gui-darwin-amd64` |
+| Windows x64 | `contextloom-windows-amd64.exe` | `contextloom-gui-windows-amd64.exe` |
+| Windows arm64 | `contextloom-windows-arm64.exe` | `contextloom-gui-windows-arm64.exe` |
+| Windows 32-bit | `contextloom-windows-386.exe` | — |
+| Linux x86-64 | `contextloom-linux-amd64` | build from source (WebKitGTK) |
+| Linux arm64 / 386 / armv5-7 | `contextloom-linux-arm64` … | — |
+| Linux ppc64le / s390x / riscv64 / loong64 / mips* | `contextloom-linux-<arch>` | — |
+| FreeBSD / NetBSD / OpenBSD / DragonFly | `contextloom-<os>-amd64` | — |
+| Solaris / AIX | `contextloom-solaris-amd64`, `contextloom-aix-ppc64` | — |
+
+> **GUI needs its backend next to it.** Put `contextloom-gui` and `contextloom` in the **same
+> directory** (the GUI locates the backend via `os.Executable()`), or point at it with
+> `CONTEXTLOOM_BIN=/path/to/contextloom`. The Windows GUI is a GUI-subsystem exe — double-click
+> it and no console window appears.
+
+```bash
+# macOS / Linux (TUI): download, make executable, run
+chmod +x contextloom-linux-amd64 && ./contextloom-linux-amd64 --version
+```
+
+> **Linux GUI** is the one target we do not prebuild: Wails binds to the system WebView, so a
+> portable Linux GUI binary would have to assume GTK3/WebKitGTK versions. Build it from source
+> with `-tags production` (see §GUI Desktop Shell) — on a headless host it automatically falls
+> back to browser mode.
 
 ## Quick Start
 

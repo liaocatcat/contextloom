@@ -24,7 +24,7 @@ CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
   go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
 # GUI —— 从任意主机交叉编译 Windows（需 mingw-w64；-H windowsgui 必带）：
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 ```
@@ -34,7 +34,7 @@ CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
 | 单元 | 源码 | CGO | 能否交叉编译？ |
 |---|---|---|---|
 | TUI `contextloom` | `./cmd/contextloom` | **关**（`CGO_ENABLED=0`） | 可以，覆盖所有 Go 目标 |
-| GUI `contextloom-gui` | `./cmd/contextloom-gui` | **开**（`CGO_ENABLED=1`） | 仅在具备匹配的交叉 C 工具链时（Windows 用 mingw-w64） |
+| GUI `contextloom-gui` | `./cmd/contextloom-gui` | macOS/Linux **开**、Windows **关** | macOS/Linux 需匹配的交叉 C 工具链；Windows 为纯 Go COM 绑定，任意宿主可编译 |
 
 ## 1. 前置条件
 
@@ -42,7 +42,7 @@ CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
 - **TUI**：无需其他。纯 Go，无 C 工具链、无系统库。
 - **GUI**：C 编译器 + 平台 WebView 头文件：
   - macOS：Xcode Command Line Tools（`xcode-select --install`）。
-  - Windows：mingw-w64（本机，或从 macOS/Linux 交叉编译时使用）。
+  - Windows：**无需任何东西**——Windows GUI 是纯 Go（COM 绑定），不需要 C 工具链，也不需要 mingw-w64。
   - Linux：GTK 3 + WebKitGTK 2 开发包（见 §3.3）。
 
 一次性拉取依赖：
@@ -135,13 +135,16 @@ CGO_ENABLED=0 GOOS=openbsd   GOARCH=amd64 go build -ldflags="-s -w" -o contextlo
 CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-dragonfly-amd64 ./cmd/contextloom
 ```
 
-**Solaris、AIX、Plan 9**
+**Solaris、AIX**
 
 ```bash
 CGO_ENABLED=0 GOOS=solaris GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-solaris-amd64 ./cmd/contextloom
 CGO_ENABLED=0 GOOS=aix     GOARCH=ppc64 go build -ldflags="-s -w" -o contextloom-aix-ppc64     ./cmd/contextloom
-CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-plan9-amd64   ./cmd/contextloom
 ```
+
+> ⚠️ **不支持 Plan 9。** 上游终端依赖（`github.com/charmbracelet/x/term`）没有 plan9 实现，
+> TUI 链接会报 `undefined: state / isTerminal / makeRaw / getState`。除非替换终端层，否则
+> 无解，故 plan9 已从构建矩阵中移除。
 
 ### 2.2 一键批量构建（全部 TUI 目标）
 
@@ -162,7 +165,7 @@ targets=(
   windows/amd64  windows/arm64 windows/386
   freebsd/amd64  freebsd/arm64
   netbsd/amd64   openbsd/amd64 dragonfly/amd64
-  solaris/amd64  aix/ppc64     plan9/amd64
+  solaris/amd64  aix/ppc64
 )
 
 for t in "${targets[@]}"; do
@@ -255,7 +258,7 @@ make build-gui-macos          # 内部执行 scripts/build-macos-app.sh
 > first deprecated in macOS 15.0 - No longer supported [-Wdeprecated-declarations]
 > ```
 >
-> 这是第三方依赖 **Wails v2.9.2** 调用了 macOS 15 起弃用的 AppKit API 所产生的**警告（warning）**，不是错误：构建仍 `exit 0` 并产出可用二进制（实测输出版本号 ContextLoom GUI v2.3.0）。**所有 Wails v2 版本（含 v2.16.0）都仍调用该 API，升级 Wails 无法消除。** 如需让日志清爽，加 `CGO_CFLAGS` 关闭该类告警即可（已验证构建仍成功、告警消失）：
+> 这是第三方依赖 **Wails v2.9.2** 调用了 macOS 15 起弃用的 AppKit API 所产生的**警告（warning）**，不是错误：构建仍 `exit 0` 并产出可用二进制（实测输出版本号 ContextLoom GUI v2.4.0）。**所有 Wails v2 版本（含 v2.16.0）都仍调用该 API，升级 Wails 无法消除。** 如需让日志清爽，加 `CGO_CFLAGS` 关闭该类告警即可（已验证构建仍成功、告警消失）：
 >
 > ```bash
 > CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
@@ -264,23 +267,22 @@ make build-gui-macos          # 内部执行 scripts/build-macos-app.sh
 
 `scripts/build-macos-app.sh` 会把 `contextloom` 与 `contextloom-gui` 一起构建进 `./ContextLoom.app/Contents/MacOS/`，写入 `Info.plist`，并标记可执行。在 macOS 上，双击**裸**二进制会让 LaunchServices 用 Terminal.app 打开；`.app` 包则以正规 GUI 应用方式启动，无控制台窗口。
 
-### 3.2 Windows（本机或交叉编译——均需 mingw-w64）
+### 3.2 Windows（无需 C 工具链——纯 Go COM 绑定）
+
+**不需要 mingw-w64。** Wails v2 的 Windows 后端是纯 Go 实现（`wailsapp/go-webview2`，
+对 WebView2 运行时的 COM 绑定）；模块里带 `import "C"` 的文件全部是 `*_darwin.go`。
+因此 Windows GUI 在**任意宿主**（Windows/macOS/Linux）以 `CGO_ENABLED=0` 即可构建，
+完全不需要交叉 C 工具链。（本文档早期版本称必须装 mingw-w64，是**误传**——实测传入
+bogus `CC` 仍构建成功，证明该路径根本不调用 C 编译器。）
 
 ```bash
-# Windows 本机（已装 mingw-w64 / MSYS2），amd64：
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+# Windows amd64 —— 任意宿主，无需 mingw：
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
-# 从 macOS/Linux 交叉编译同样的产物（先装 mingw-w64）：
-#   Debian/Ubuntu:  sudo apt install gcc-mingw-w64-x86-64
-#   macOS (brew):   brew install mingw-w64
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
-
-# Windows on ARM64（aarch64 mingw-w64）：
-CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
+# Windows on ARM64 —— 同样无需 aarch64 mingw：
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 
@@ -293,7 +295,7 @@ make build-gui-win
 PowerShell（推荐单行，避免反引号续行符在复制粘贴中出错的坑）：
 
 ```powershell
-$env:CGO_ENABLED="1"; $env:GOOS="windows"; $env:GOARCH="amd64"
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
 go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED   # 清理，避免污染后续构建
@@ -302,7 +304,7 @@ Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED   # 清理，避免污染后�
 多行续行写法（PowerShell 用反引号 `` ` ``）：
 
 ```powershell
-$env:CGO_ENABLED="1"; $env:GOOS="windows"; $env:GOARCH="amd64"
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
 go build -tags production -ldflags="-s -w -H windowsgui" `
   -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 ```
@@ -364,8 +366,8 @@ make verify-gui      # 校验已产出的 contextloom-gui.exe
 | TUI，任意平台 | `CGO_ENABLED=0` | 无 | `-ldflags="-s -w"` |
 | GUI，macOS（arm64/amd64） | `CGO_ENABLED=1` | Xcode CLT | `-tags production`（可选 `CGO_CFLAGS="-Wno-deprecated-declarations"` 屏蔽弃用告警） |
 | GUI，macOS 通用 | `CGO_ENABLED=1` | Xcode CLT + `lipo` | `-tags production` + `lipo -create` |
-| GUI，Windows amd64 | `CGO_ENABLED=1` | mingw-w64（`x86_64-w64-mingw32-gcc`） | `-tags production -ldflags="… -H windowsgui"` |
-| GUI，Windows arm64 | `CGO_ENABLED=1` | aarch64 mingw-w64（`aarch64-w64-mingw32-gcc`） | 同上 |
+| GUI，Windows amd64 | `CGO_ENABLED=0` | **无** | `-tags production -ldflags="… -H windowsgui"` |
+| GUI，Windows arm64 | `CGO_ENABLED=0` | **无** | 同上 |
 | GUI，Linux | `CGO_ENABLED=1` | `libgtk-3-dev`、`libwebkit2gtk-4.0-dev`、`pkg-config` | `-tags production` |
 
 ## 5. Makefile 目标速查
@@ -378,7 +380,7 @@ make verify-gui      # 校验已产出的 contextloom-gui.exe
 | `make lint` | `golangci-lint run ./...`。 |
 | `make clean` | 删除本地 `contextloom` 二进制。 |
 | `make build-gui` | 为本机构建 GUI。宿主感知：Windows 宿主会加 `-H windowsgui` 并跑 `pecheck`；macOS/Linux 宿主不加该标志且跳过 `pecheck`（非 PE 目标）。 |
-| `make build-gui-win` | 交叉编译 Windows GUI（amd64，mingw-w64）+ `pecheck`。 |
+| `make build-gui-win` | 交叉编译 Windows GUI（amd64，纯 Go，无需 mingw）+ `pecheck`。 |
 | `make verify-gui` | 对已产出的 `contextloom-gui.exe` 跑 `pecheck`。 |
 | `make build-gui-macos` | 通过 `scripts/build-macos-app.sh` 打包 `./ContextLoom.app`。 |
 
@@ -409,7 +411,7 @@ deploy/
 | 双击 Windows GUI 弹出黑色控制台窗口 | 丢失 `-H windowsgui` → PE `Subsystem=3` | 带 `-H windowsgui` 重新构建；用 `go run ./scripts/pecheck <exe>` 校验（期望 Subsystem=2）。 |
 | `gcc: command not found` / `cgo: C compiler not found` | CGO 关闭或无 C 工具链 | 设 `CGO_ENABLED=1` 并安装 gcc/Clang/mingw-w64。 |
 | `Package webkit2gtk-4.0 was not found`（Linux） | 缺 WebKitGTK 开发头文件 | 安装 `libwebkit2gtk-4.0-dev`（Debian）/ `webkit2gtk4.0-devel`（Fedora）。 |
-| 交叉编译 macOS/Linux GUI 失败 | CGO 交叉编译需匹配的交叉工具链 | 在目标 OS 上构建 GUI，或用正规交叉 C 工具链。只有 **Windows** GUI 能干净交叉编译（经 mingw-w64）。 |
+| 交叉编译 macOS/Linux GUI 失败 | CGO 交叉编译需匹配的交叉工具链 | 在目标 OS 上构建 GUI，或用正规交叉 C 工具链。**Windows** GUI 完全不需要 C 工具链（`CGO_ENABLED=0`）。 |
 | 构建后 Windows TUI 无法交互 | 给 TUI 加了 `-H windowsgui` | 去掉——TUI 是控制台程序。 |
 | GUI 启动时找不到 `contextloom` 后端 | 两二进制不在同一目录 | 放到同一目录，或设 `CONTEXTLOOM_BIN`。 |
 | 老主板跑错 ARM 变体 | `GOARM` 不匹配 | ARMv5 用 `GOARM=5`，ARMv6 用 `6`，ARMv7 用 `7`。 |
@@ -476,7 +478,7 @@ docker run -it --rm contextloom:local /app/contextloom   # 改为运行 TUI
 ## 关键结论
 
 - **TUI**：`CGO_ENABLED=0`，纯 Go，可交叉编译到 §2.1 的所有目标——**切勿**加 `-H windowsgui`。
-- **GUI**：`CGO_ENABLED=1` + `-tags production`；Windows 需 mingw-w64 且必须带 `-H windowsgui`（用 `scripts/pecheck` 校验，Subsystem=2）；macOS/Linux 宿主构建**不要**加 `-H windowsgui`。
+- **GUI**：macOS/Linux 用 `CGO_ENABLED=1` + `-tags production`；Windows 用 `CGO_ENABLED=0` 即可（纯 Go COM 绑定，无需 mingw）。Windows 必须带 `-H windowsgui`（用 `scripts/pecheck` 校验，Subsystem=2）；macOS/Linux 宿主构建**不要**加它。
 - **macOS 15+ 的 `setShowsBaselineSeparator:` 弃用告警无害**（Wails v2 固有，非错误），可用 `CGO_CFLAGS="-Wno-deprecated-declarations"` 屏蔽。
 - **把 `contextloom` 与 `contextloom-gui` 放在同一目录**（或设 `CONTEXTLOOM_BIN`）。
 - **headless Linux** 自动回退浏览器模式。
