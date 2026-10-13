@@ -257,8 +257,8 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 
 ## 下载安装（预编译二进制）
 
-每个 [Release](https://github.com/liaocatcat/contextloom/releases) 都附带了全平台预编译产物
-（[Gitee 同步镜像](https://gitee.com/liao-yexian-my/contextloom/releases)），**无需安装 Go 工具链**。
+每个 [Release](https://github.com/liaocatcat/ds-contextloom-harness/releases) 都附带了全平台预编译产物
+（[Gitee 同步镜像](https://gitee.com/liao-yexian-my/ds-contextloom-harness/releases)），**无需安装 Go 工具链**。
 
 **怎么选文件：** `contextloom-<os>-<arch>[.exe]` 是 **TUI**（终端）版；
 `contextloom-gui-<os>-<arch>[.exe]` 是 **GUI**（桌面窗口）版。
@@ -292,7 +292,7 @@ chmod +x contextloom-linux-amd64 && ./contextloom-linux-amd64 --version
 ## 快速开始
 
 ```bash
-git clone https://github.com/liaocatcat/contextloom.git
+git clone https://github.com/liaocatcat/ds-contextloom-harness.git
 cd contextloom
 
 # 1. 配置
