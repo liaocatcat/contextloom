@@ -16,7 +16,7 @@ across every target we support — no shortcuts, no omitted flags.
 make build
 
 # TUI — any target (pure Go, no toolchain extras):
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-linux-arm64 ./cmd/contextloom
 
 # GUI — current platform (needs a C toolchain + WebView dev libs):
 CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
@@ -28,7 +28,7 @@ CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
 # GUI — Windows from any host (needs mingw-w64; -H windowsgui is mandatory):
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 ```
 
 Two build units, two rules:
@@ -59,7 +59,7 @@ The TUI (`./cmd/contextloom`) is pure Go and cross-compiles natively. Every comm
 follows the same shape:
 
 ```
-CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -ldflags="-s -w" -o dist/contextloom-<os>-<arch>[.exe] ./cmd/contextloom
+CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -ldflags="-s -w" -o contextloom-<os>-<arch>[.exe] ./cmd/contextloom
 ```
 
 ### 2.1 Full cross-compile matrix
@@ -67,40 +67,40 @@ CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -ldflags="-s -w" -o dist/contextl
 **macOS**
 
 ```bash
-CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-darwin-arm64 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-darwin-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-darwin-arm64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-darwin-amd64 ./cmd/contextloom
 ```
 
 **Linux — x86 and ARM family**
 
 ```bash
-CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-linux-amd64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-linux-386     ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-linux-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-linux-arm64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=386   go build -ldflags="-s -w" -o contextloom-linux-386     ./cmd/contextloom
 
 # 32-bit ARM: pick the ARM revision with GOARM (5 = ARMv5, 6 = ARMv6, 7 = ARMv7)
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=5 go build -ldflags="-s -w" -o dist/contextloom-linux-armv5 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o dist/contextloom-linux-armv6 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o dist/contextloom-linux-armv7 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=5 go build -ldflags="-s -w" -o contextloom-linux-armv5 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o contextloom-linux-armv6 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o contextloom-linux-armv7 ./cmd/contextloom
 ```
 
 **Linux — other architectures**
 
 ```bash
-CGO_ENABLED=0 GOOS=linux   GOARCH=ppc64le  go build -ldflags="-s -w" -o dist/contextloom-linux-ppc64le  ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=s390x    go build -ldflags="-s -w" -o dist/contextloom-linux-s390x    ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=riscv64  go build -ldflags="-s -w" -o dist/contextloom-linux-riscv64  ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=loong64  go build -ldflags="-s -w" -o dist/contextloom-linux-loong64  ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=mips64le go build -ldflags="-s -w" -o dist/contextloom-linux-mips64le ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=mipsle   go build -ldflags="-s -w" -o dist/contextloom-linux-mipsle   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=ppc64le  go build -ldflags="-s -w" -o contextloom-linux-ppc64le  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=s390x    go build -ldflags="-s -w" -o contextloom-linux-s390x    ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=riscv64  go build -ldflags="-s -w" -o contextloom-linux-riscv64  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=loong64  go build -ldflags="-s -w" -o contextloom-linux-loong64  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=mips64le go build -ldflags="-s -w" -o contextloom-linux-mips64le ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=mipsle   go build -ldflags="-s -w" -o contextloom-linux-mipsle   ./cmd/contextloom
 ```
 
 **Windows**
 
 ```bash
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
-CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe ./cmd/contextloom
-CGO_ENABLED=0 GOOS=windows GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-windows-arm64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=386   go build -ldflags="-s -w" -o contextloom-windows-386.exe   ./cmd/contextloom
 ```
 
 > ⚠️ **Do NOT add `-H windowsgui` to a Windows TUI build.** The TUI is a *console*
@@ -117,7 +117,7 @@ PowerShell (note the `$env:` syntax — **do not** use `VAR=value go build`, it 
 
 ```powershell
 $env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
-go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
+go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 ```
 
@@ -125,25 +125,25 @@ CMD (env assignment via `set`; forward slashes in the source path also work —
 `./cmd/contextloom` and `.\cmd\contextloom` are both accepted):
 
 ```cmd
-set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
 ```
 
 **BSD family**
 
 ```bash
-CGO_ENABLED=0 GOOS=freebsd   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-amd64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=freebsd   GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-arm64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=netbsd    GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-netbsd-amd64    ./cmd/contextloom
-CGO_ENABLED=0 GOOS=openbsd   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-openbsd-amd64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-dragonfly-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=freebsd   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-freebsd-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=freebsd   GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-freebsd-arm64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=netbsd    GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-netbsd-amd64    ./cmd/contextloom
+CGO_ENABLED=0 GOOS=openbsd   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-openbsd-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-dragonfly-amd64 ./cmd/contextloom
 ```
 
 **Solaris, AIX, Plan 9**
 
 ```bash
-CGO_ENABLED=0 GOOS=solaris GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-solaris-amd64 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=aix     GOARCH=ppc64 go build -ldflags="-s -w" -o dist/contextloom-aix-ppc64     ./cmd/contextloom
-CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-plan9-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=solaris GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-solaris-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=aix     GOARCH=ppc64 go build -ldflags="-s -w" -o contextloom-aix-ppc64     ./cmd/contextloom
+CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-plan9-amd64   ./cmd/contextloom
 ```
 
 ### 2.2 One-shot batch build (all TUI targets)
@@ -152,9 +152,8 @@ Iterate a `GOOS/GOARCH` table in a shell loop. The `.exe` suffix is applied only
 
 ```bash
 #!/usr/bin/env bash
-# build-all-tui.sh — build the TUI for every supported target into dist/
+# build-all-tui.sh — build the TUI for every supported target into the current directory
 set -euo pipefail
-mkdir -p dist
 
 # "GOOS/GOARCH[/GOARM]" entries
 targets=(
@@ -171,8 +170,8 @@ targets=(
 
 for t in "${targets[@]}"; do
   IFS='/' read -r os arch arm <<< "$t"
-  out="dist/contextloom-${os}-${arch}"
-  [ "$arch" = "arm" ] && [ -n "${arm:-}" ] && out="dist/contextloom-${os}-armv${arm}"
+  out="contextloom-${os}-${arch}"
+  [ "$arch" = "arm" ] && [ -n "${arm:-}" ] && out="contextloom-${os}-armv${arm}"
   [ "$os" = "windows" ] && out="${out}.exe"
 
   echo "==> ${os}/${arch}${arm:+/GOARM=$arm} -> ${out}"
@@ -186,8 +185,7 @@ echo "✅ TUI builds complete."
 `VAR=value go build`, PowerShell does not support POSIX env prefixes):
 
 ```powershell
-# build-all-tui.ps1 — build the TUI for every supported target into dist\
-New-Item -ItemType Directory -Force -Path dist | Out-Null
+# build-all-tui.ps1 — build the TUI for every supported target into the current directory
 
 $targets = @(
   'darwin/amd64',  'darwin/arm64',
@@ -206,7 +204,7 @@ foreach ($t in $targets) {
   $goos = $parts[0]; $goarch = $parts[1]
   $env:CGO_ENABLED = '0'; $env:GOOS = $goos; $env:GOARCH = $goarch
   if ($parts.Count -ge 3) { $env:GOARM = $parts[2] } else { Remove-Item Env:GOARM -ErrorAction SilentlyContinue }
-  $out = "dist/contextloom-$goos-$goarch"
+  $out = "contextloom-$goos-$goarch"
   if ($parts.Count -ge 3) { $out += "v" + $parts[2] }
   if ($goos -eq 'windows') { $out += '.exe' }
   go build -ldflags="-s -w" -o $out ./cmd/contextloom
@@ -251,14 +249,14 @@ CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
   go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
 # Explicit architecture (build on the matching host, or with a C cross toolchain)
-CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" GOARCH=arm64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
-CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" GOARCH=amd64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-amd64 ./cmd/contextloom-gui
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" GOARCH=arm64 go build -tags production -ldflags="-s -w" -o contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" GOARCH=amd64 go build -tags production -ldflags="-s -w" -o contextloom-gui-darwin-amd64 ./cmd/contextloom-gui
 
 # Universal binary (merge both slices with lipo)
-lipo -create -output dist/contextloom-gui-darwin-universal \
-  dist/contextloom-gui-darwin-arm64 dist/contextloom-gui-darwin-amd64
+lipo -create -output contextloom-gui-darwin-universal \
+  contextloom-gui-darwin-arm64 contextloom-gui-darwin-amd64
 
-# Package a double-clickable .app bundle -> dist/ContextLoom.app
+# Package a double-clickable .app bundle -> ./ContextLoom.app
 make build-gui-macos          # runs scripts/build-macos-app.sh
 ```
 
@@ -285,7 +283,7 @@ make build-gui-macos          # runs scripts/build-macos-app.sh
 > The flag only suppresses the warning; the build still exits 0 and the binary is identical.
 
 `scripts/build-macos-app.sh` builds both `contextloom` and `contextloom-gui` into
-`dist/ContextLoom.app/Contents/MacOS/`, writes `Info.plist`, and marks them executable. On
+`./ContextLoom.app/Contents/MacOS/`, writes `Info.plist`, and marks them executable. On
 macOS, double-clicking a **bare** binary makes LaunchServices open it with Terminal.app; the
 `.app` bundle launches it as a proper GUI app with no console window.
 
@@ -295,19 +293,19 @@ macOS, double-clicking a **bare** binary makes LaunchServices open it with Termi
 # Native on Windows (mingw-w64 / MSYS2 installed), amd64:
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
 # Cross-compile the same from macOS/Linux (install mingw-w64 first):
 #   Debian/Ubuntu:  sudo apt install gcc-mingw-w64-x86-64
 #   macOS (brew):   brew install mingw-w64
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
 # Windows on ARM64 (aarch64 mingw-w64):
 CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 
 # Makefile shortcut (cross-compile amd64 + PE check):
 make build-gui-win
@@ -323,7 +321,7 @@ PowerShell (note the `$env:` syntax — **do not** use `VAR=value go build`, it 
 
 ```powershell
 $env:CGO_ENABLED="1"; $env:CC="x86_64-w64-mingw32-gcc"; $env:GOOS="windows"; $env:GOARCH="amd64"
-go build -tags production -ldflags="-s -w -H windowsgui" -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 Remove-Item Env:GOOS, Env:GOARCH, Env:CC, Env:CGO_ENABLED
 ```
 
@@ -333,7 +331,7 @@ trailing space after the value** — a trailing space becomes part of the variab
 each `set` on its own line):
 
 ```cmd
-set CGO_ENABLED=1&& set CC=x86_64-w64-mingw32-gcc&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o dist/contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
+set CGO_ENABLED=1&& set CC=x86_64-w64-mingw32-gcc&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
 ```
 
 > On a native Windows host, `CC` can usually be omitted (CGO finds `gcc` from mingw-w64/MSYS2
@@ -385,8 +383,8 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 Any Windows GUI build should be checked: the PE `Subsystem` must be **2 (GUI)**, not 3 (CONSOLE).
 
 ```bash
-go run ./scripts/pecheck dist/contextloom-gui-windows-amd64.exe        # expect: subsystem=2(GUI) OK
-go run ./scripts/pecheck dist/contextloom-gui-windows-amd64.exe 2      # explicit expected value
+go run ./scripts/pecheck contextloom-gui-windows-amd64.exe        # expect: subsystem=2(GUI) OK
+go run ./scripts/pecheck contextloom-gui-windows-amd64.exe 2      # explicit expected value
 ```
 
 `scripts/pecheck` reads the PE Optional Header `Subsystem` field directly (offset 68) and
@@ -424,7 +422,7 @@ make verify-gui      # verifies an already-built contextloom-gui.exe
 | `make build-gui` | Build the GUI for the host. Host-aware: on a Windows host it adds `-H windowsgui` and runs `pecheck`; on macOS/Linux it omits the flag and skips `pecheck` (non-PE target). |
 | `make build-gui-win` | Cross-compile the Windows GUI (amd64, mingw-w64) + `pecheck`. |
 | `make verify-gui` | Run `pecheck` on an already-built `contextloom-gui.exe`. |
-| `make build-gui-macos` | Package `dist/ContextLoom.app` via `scripts/build-macos-app.sh`. |
+| `make build-gui-macos` | Package `./ContextLoom.app` via `scripts/build-macos-app.sh`. |
 
 ## 6. Runtime Layout and Environment Variables
 
