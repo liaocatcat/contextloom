@@ -181,6 +181,12 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 make build-gui-macos        # runs scripts/build-macos-app.sh internally
 ```
 
+> ⚠️ On macOS 15+ the build prints a Wails deprecation warning (`'setShowsBaselineSeparator:' is deprecated … first deprecated in macOS 15.0`) — it comes from the third-party Wails dependency, **is a warning, not an error**, and the build still exits 0 and produces a working binary (upgrading Wails does not remove it). Silence it with:
+>
+> ```bash
+> CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+> ```
+
 #### Windows (native or cross-compiled — both need mingw-w64)
 
 ```bash

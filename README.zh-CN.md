@@ -175,11 +175,16 @@ GUI 外壳会从自身所在目录拉起 `contextloom` 后端（或用 `CONTEXTL
 
 ```bash
 # GUI 二进制（当前平台）
-CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
+# macOS 15+ 会打印 Wails 的 setShowsBaselineSeparator: 弃用告警（无害，非错误）；
+# 加 CGO_CFLAGS 可屏蔽该告警：
+CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
+  go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
 # 打包 .app（Finder 双击以 GUI 应用启动，避免 LaunchServices 用 Terminal 打开裸二进制）
 make build-gui-macos        # 内部执行 scripts/build-macos-app.sh
 ```
+
+> ⚠️ **macOS 15+ 的 `setShowsBaselineSeparator:` 弃用告警无害，别当报错。** 这是第三方依赖 Wails v2 调用已弃用 AppKit API 的**警告（warning）**，构建仍成功并产出可用二进制；所有 Wails v2 版本（含 v2.16.0）均如此，升级无法消除。如需日志清爽，加一行 `CGO_CFLAGS="-Wno-deprecated-declarations"` 重新构建即可（已验证构建仍成功、告警消失）。
 
 #### Windows（本机或交叉编译均需 mingw-w64）
 
@@ -201,7 +206,7 @@ CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
   -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 ```
 
-> ⚠️ **`-H windowsgui` 是生死标志**：Windows GUI 构建漏掉它会产出 console 子系统 exe（Subsystem=3），双击必弹黑色命令行窗口。该标志按**目标 GOOS=windows** 生效，与构建主机无关——在 Linux/macOS 上交叉编译时同样必须带。
+> ⚠️ **`-H windowsgui` 是生死标志**：Windows GUI 构建漏掉它会产出 console 子系统 exe（Subsystem=3），双击必弹黑色命令行窗口。该标志按**目标 GOOS=windows** 生效，与构建主机无关——在 Linux/macOS 上交叉编译时同样必须带。反过来说，在 macOS/Linux 宿主上构建 GUI **不要**加它（只对 `GOOS=windows` 有效，加到 darwin 目标会导致链接失败）。
 >
 > 构建后自动校验 PE 子系统标志（防回归）：
 >
@@ -235,7 +240,7 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 | 目标 | CGO | 额外依赖 | 关键标志 |
 |---|---|---|---|
 | TUI 任意平台 | `CGO_ENABLED=0` | 无 | `-ldflags="-s -w"` |
-| GUI macOS | `CGO_ENABLED=1` | Xcode CLT | `-tags production` |
+| GUI macOS | `CGO_ENABLED=1` | Xcode CLT | `-tags production`（可选 `CGO_CFLAGS="-Wno-deprecated-declarations"` 屏蔽弃用告警） |
 | GUI Windows amd64 | `CGO_ENABLED=1` | mingw-w64 | `-tags production -ldflags="… -H windowsgui"` |
 | GUI Windows arm64 | `CGO_ENABLED=1` | aarch64 mingw-w64 | 同上 |
 | GUI Linux | `CGO_ENABLED=1` | WebKitGTK 开发库 + gcc | `-tags production` |
