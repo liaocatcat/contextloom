@@ -112,11 +112,15 @@ NOTES="$ROOT/docs/release/$TAG.md"
 # ---------- GitHub Release ----------
 if [ -n "${GITHUB_TOKEN:-}" ]; then
   echo "==> 创建 GitHub Release 并上传附件"
-  GH_USER=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | sed -n 's/.*"login":"\([^"]*\)".*/\1/p')
+  # 注意：GitHub 返回 "login": "xxx"（冒号后有空格），正则必须容忍空白，否则解析为空 -> 404
+  GH_USER=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | sed -n 's/.*"login"[: ]*"\([^"]*\)".*/\1/p')
+  [ -n "$GH_USER" ] || { echo "❌ 无法解析 GitHub 用户名"; exit 1; }
+  # 用 python 生成合法 JSON（正确转义 Release 说明里的换行/引号），写入临时文件避免命令行长度与转义问题
+  python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1],"body":open(sys.argv[2]).read()}))' "$TAG" "$NOTES" > /tmp/gh-release-body.json
   curl -s -X POST \
     -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GH_USER}/contextloom/releases" \
-    -d "$(printf '{"tag_name":"%s","name":"%s","body":%s}' "$TAG" "$TAG" "$(python3 -c 'import json,sys;print(json.dumps(open(sys.argv[1]).read()))' "$NOTES")")" \
+    --data @/tmp/gh-release-body.json \
     -o /tmp/gh-release.json
   GH_UPLOAD=$(sed -n 's/.*"upload_url": "\([^"]*\){.*/\1/p' /tmp/gh-release.json)
   if [ -z "$GH_UPLOAD" ]; then echo "❌ GitHub Release 创建失败:"; head -c 400 /tmp/gh-release.json; echo; else
@@ -135,17 +139,23 @@ fi
 # ---------- Gitee Release ----------
 if [ -n "${GITEE_TOKEN:-}" ]; then
   echo "==> 创建 Gitee Release 并上传附件"
-  GITEE_USER=$(curl -s "https://gitee.com/api/v5/user?access_token=$GITEE_TOKEN" | sed -n 's/.*"login":"\([^"]*\)".*/\1/p')
-  # Gitee 附件需 multipart 上传，逐个文件建 release 附件
-  for f in "$OUT"/contextloom-* "$OUT"/SHA256SUMS; do
-    [ -f "$f" ] || continue
-    curl -s -X POST "https://gitee.com/api/v5/repos/${GITEE_USER}/contextloom/releases" \
-      -F "access_token=$GITEE_TOKEN" -F "tag_name=$TAG" -F "name=$TAG" \
-      -F "body=@$NOTES" -F "target_commitish=main" \
-      -F "attach=@$f" -o /tmp/gitee-release.json || true
-    echo "    ↑ $(basename "$f")"
-  done
-  echo "    ✅ https://gitee.com/${GITEE_USER}/contextloom/releases"
+  GITEE_USER=$(curl -s "https://gitee.com/api/v5/user?access_token=$GITEE_TOKEN" | sed -n 's/.*"login"[: ]*"\([^"]*\)".*/\1/p')
+  [ -n "$GITEE_USER" ] || { echo "❌ 无法解析 Gitee 用户名"; exit 1; }
+  # 先建一次 release（不带附件），拿到 release id —— 否则逐个文件建 release 会产生多个重复 Release
+  # 注意：body 用 `=<file`（读取文件内容作为字段值），而非 `=@file`（那是上传文件附件，会被判 body is invalid）
+  curl -s -X POST "https://gitee.com/api/v5/repos/${GITEE_USER}/contextloom/releases" \
+    -F "access_token=$GITEE_TOKEN" -F "tag_name=$TAG" -F "name=$TAG" \
+    -F "body=<$NOTES" -F "target_commitish=main" -o /tmp/gitee-release.json
+  GITEE_RID=$(sed -n 's/.*"id":\([0-9]*\).*/\1/p' /tmp/gitee-release.json | head -1)
+  if [ -z "$GITEE_RID" ]; then echo "❌ Gitee Release 创建失败:"; head -c 400 /tmp/gitee-release.json; echo; else
+    for f in "$OUT"/contextloom-* "$OUT"/SHA256SUMS; do
+      [ -f "$f" ] || continue
+      curl -s -X POST "https://gitee.com/api/v5/repos/${GITEE_USER}/contextloom/releases/${GITEE_RID}/attach_files" \
+        -F "access_token=$GITEE_TOKEN" -F "file=@$f" -o /dev/null || true
+      echo "    ↑ $(basename "$f")"
+    done
+    echo "    ✅ https://gitee.com/${GITEE_USER}/contextloom/releases"
+  fi
 else
   echo "⚠️  未设置 GITEE_TOKEN，跳过 Gitee Release"
 fi
