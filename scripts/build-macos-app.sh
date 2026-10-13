@@ -6,7 +6,7 @@
 #       打开（弹出命令行窗口）。打包成 .app 应用包后，Finder 双击以 GUI
 #       应用方式启动（无终端窗口），与 业界主流桌面编码 Agent / 常规桌面应用一致。
 #
-# 产物：dist/ContextLoom.app
+# 产物：./ContextLoom.app（仓库根，与裸二进制产物同目录）
 #   Contents/
 #     Info.plist          # 应用元数据（CFBundleExecutable=contextloom-gui 等）
 #     MacOS/
@@ -23,7 +23,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 APP_NAME="ContextLoom"
-DIST="$ROOT/dist"
+DIST="$ROOT"
 APP="$DIST/$APP_NAME.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"

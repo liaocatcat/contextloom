@@ -16,7 +16,7 @@
 make build
 
 # TUI —— 任意目标（纯 Go，无需额外工具链）：
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-linux-arm64 ./cmd/contextloom
 
 # GUI —— 当前平台（需 C 工具链 + WebView 开发库）：
 # macOS 15+ 建议带 CGO_CFLAGS 屏蔽 Wails 的弃用告警（无害，见 §3.1）：
@@ -26,7 +26,7 @@ CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
 # GUI —— 从任意主机交叉编译 Windows（需 mingw-w64；-H windowsgui 必带）：
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 ```
 
 两个构建单元，两条规则：
@@ -56,7 +56,7 @@ go mod download
 TUI（`./cmd/contextloom`）是纯 Go 实现，天然支持交叉编译。以下命令格式统一：
 
 ```
-CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -ldflags="-s -w" -o dist/contextloom-<os>-<arch>[.exe] ./cmd/contextloom
+CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -ldflags="-s -w" -o contextloom-<os>-<arch>[.exe] ./cmd/contextloom
 ```
 
 ### 2.1 完整交叉编译矩阵
@@ -64,61 +64,61 @@ CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -ldflags="-s -w" -o dist/contextl
 **macOS**
 
 ```bash
-CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-darwin-arm64 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-darwin-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-darwin-arm64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-darwin-amd64 ./cmd/contextloom
 ```
 
 **Linux —— x86 与 ARM 家族**
 
 ```bash
-CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-linux-amd64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-linux-386     ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-linux-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-linux-arm64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=386   go build -ldflags="-s -w" -o contextloom-linux-386     ./cmd/contextloom
 
 # 32 位 ARM：用 GOARM 选择 ARM 版本（5 = ARMv5，6 = ARMv6，7 = ARMv7）
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=5 go build -ldflags="-s -w" -o dist/contextloom-linux-armv5 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o dist/contextloom-linux-armv6 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o dist/contextloom-linux-armv7 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=5 go build -ldflags="-s -w" -o contextloom-linux-armv5 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o contextloom-linux-armv6 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o contextloom-linux-armv7 ./cmd/contextloom
 ```
 
 **Linux —— 其他架构**
 
 ```bash
-CGO_ENABLED=0 GOOS=linux   GOARCH=ppc64le  go build -ldflags="-s -w" -o dist/contextloom-linux-ppc64le  ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=s390x    go build -ldflags="-s -w" -o dist/contextloom-linux-s390x    ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=riscv64  go build -ldflags="-s -w" -o dist/contextloom-linux-riscv64  ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=loong64  go build -ldflags="-s -w" -o dist/contextloom-linux-loong64  ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=mips64le go build -ldflags="-s -w" -o dist/contextloom-linux-mips64le ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=mipsle   go build -ldflags="-s -w" -o dist/contextloom-linux-mipsle   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=ppc64le  go build -ldflags="-s -w" -o contextloom-linux-ppc64le  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=s390x    go build -ldflags="-s -w" -o contextloom-linux-s390x    ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=riscv64  go build -ldflags="-s -w" -o contextloom-linux-riscv64  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=loong64  go build -ldflags="-s -w" -o contextloom-linux-loong64  ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=mips64le go build -ldflags="-s -w" -o contextloom-linux-mips64le ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=mipsle   go build -ldflags="-s -w" -o contextloom-linux-mipsle   ./cmd/contextloom
 ```
 
 **Windows**
 
 ```bash
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
-CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe ./cmd/contextloom
-CGO_ENABLED=0 GOOS=windows GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-windows-arm64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=386   go build -ldflags="-s -w" -o contextloom-windows-386.exe   ./cmd/contextloom
 ```
 
 **Windows 本机 —— PowerShell / CMD**（bash 的 `VAR=x cmd` 前缀语法在 PowerShell/CMD 中不可用，须改为 `$env:` 赋值 / `set`）：
 
 ```powershell
 $env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
-go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
+go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
 
 $env:GOOS="windows"; $env:GOARCH="arm64"
-go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe ./cmd/contextloom
+go build -ldflags="-s -w" -o contextloom-windows-arm64.exe ./cmd/contextloom
 
 $env:GOOS="windows"; $env:GOARCH="386"
-go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe ./cmd/contextloom
+go build -ldflags="-s -w" -o contextloom-windows-386.exe ./cmd/contextloom
 
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED   # 清理，避免污染后续构建
 ```
 
 ```cmd
-set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe .\cmd\contextloom
-set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=arm64&& go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe .\cmd\contextloom
-set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=386&& go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe .\cmd\contextloom
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o contextloom-windows-amd64.exe .\cmd\contextloom
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=arm64&& go build -ldflags="-s -w" -o contextloom-windows-arm64.exe .\cmd\contextloom
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=386&& go build -ldflags="-s -w" -o contextloom-windows-386.exe .\cmd\contextloom
 ```
 
 > ⚠️ **CMD 的 `set X=Y&&` 等号后不要留尾随空格**：CMD 会把空格并入变量值（`GOOS=windows ` 这种带尾空格的值会导致 Go 报 `unknown GOOS`）。上例故意写成 `set GOOS=windows&&`（`&&` 紧贴值），且**不要**在 `set` 行末手动补空格。
@@ -128,19 +128,19 @@ set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=386&& go build -ldflags="-s -w
 **BSD 家族**
 
 ```bash
-CGO_ENABLED=0 GOOS=freebsd   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-amd64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=freebsd   GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-arm64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=netbsd    GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-netbsd-amd64    ./cmd/contextloom
-CGO_ENABLED=0 GOOS=openbsd   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-openbsd-amd64   ./cmd/contextloom
-CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-dragonfly-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=freebsd   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-freebsd-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=freebsd   GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-freebsd-arm64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=netbsd    GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-netbsd-amd64    ./cmd/contextloom
+CGO_ENABLED=0 GOOS=openbsd   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-openbsd-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-dragonfly-amd64 ./cmd/contextloom
 ```
 
 **Solaris、AIX、Plan 9**
 
 ```bash
-CGO_ENABLED=0 GOOS=solaris GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-solaris-amd64 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=aix     GOARCH=ppc64 go build -ldflags="-s -w" -o dist/contextloom-aix-ppc64     ./cmd/contextloom
-CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-plan9-amd64   ./cmd/contextloom
+CGO_ENABLED=0 GOOS=solaris GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-solaris-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=aix     GOARCH=ppc64 go build -ldflags="-s -w" -o contextloom-aix-ppc64     ./cmd/contextloom
+CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-plan9-amd64   ./cmd/contextloom
 ```
 
 ### 2.2 一键批量构建（全部 TUI 目标）
@@ -149,9 +149,8 @@ CGO_ENABLED=0 GOOS=plan9   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contex
 
 ```bash
 #!/usr/bin/env bash
-# build-all-tui.sh —— 把 TUI 构建到 dist/ 下所有受支持目标
+# build-all-tui.sh —— 把 TUI 构建到当前目录下所有受支持目标
 set -euo pipefail
-mkdir -p dist
 
 # "GOOS/GOARCH[/GOARM]" 条目
 targets=(
@@ -168,8 +167,8 @@ targets=(
 
 for t in "${targets[@]}"; do
   IFS='/' read -r os arch arm <<< "$t"
-  out="dist/contextloom-${os}-${arch}"
-  [ "$arch" = "arm" ] && [ -n "${arm:-}" ] && out="dist/contextloom-${os}-armv${arm}"
+  out="contextloom-${os}-${arch}"
+  [ "$arch" = "arm" ] && [ -n "${arm:-}" ] && out="contextloom-${os}-armv${arm}"
   [ "$os" = "windows" ] && out="${out}.exe"
 
   echo "==> ${os}/${arch}${arm:+/GOARM=$arm} -> ${out}"
@@ -182,8 +181,7 @@ echo "✅ TUI 构建完成。"
 **PowerShell 等价循环**（Windows 本机用户；逻辑与上方 bash 版一致，Windows 目标自动补 `.exe`）：
 
 ```powershell
-# build-all-tui.ps1 —— 把 TUI 构建到 dist/ 下所有受支持目标
-New-Item -ItemType Directory -Force -Path dist | Out-Null
+# build-all-tui.ps1 —— 把 TUI 构建到当前目录下所有受支持目标
 
 $targets = @(
   "darwin/amd64",  "darwin/arm64",
@@ -201,8 +199,8 @@ foreach ($t in $targets) {
   $p = $t -split '/'
   $os = $p[0]; $arch = $p[1]
   $arm = if ($p.Count -gt 2) { $p[2] } else { $null }
-  $out = "dist/contextloom-$os-$arch"
-  if ($arm) { $out = "dist/contextloom-$os-armv$arm" }
+  $out = "contextloom-$os-$arch"
+  if ($arm) { $out = "contextloom-$os-armv$arm" }
   if ($os -eq "windows") { $out = "$out.exe" }
 
   Write-Host "==> $os/$arch$(if ($arm) { "/GOARM=$arm" }) -> $out"
@@ -239,14 +237,14 @@ CGO_ENABLED=1 CGO_CFLAGS="-Wno-deprecated-declarations" \
   go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 
 # 显式指定架构（在匹配主机上构建，或用 C 交叉工具链）
-CGO_ENABLED=1 GOARCH=arm64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
-CGO_ENABLED=1 GOARCH=amd64 go build -tags production -ldflags="-s -w" -o dist/contextloom-gui-darwin-amd64 ./cmd/contextloom-gui
+CGO_ENABLED=1 GOARCH=arm64 go build -tags production -ldflags="-s -w" -o contextloom-gui-darwin-arm64 ./cmd/contextloom-gui
+CGO_ENABLED=1 GOARCH=amd64 go build -tags production -ldflags="-s -w" -o contextloom-gui-darwin-amd64 ./cmd/contextloom-gui
 
 # 通用二进制（用 lipo 合并两个切片）
-lipo -create -output dist/contextloom-gui-darwin-universal \
-  dist/contextloom-gui-darwin-arm64 dist/contextloom-gui-darwin-amd64
+lipo -create -output contextloom-gui-darwin-universal \
+  contextloom-gui-darwin-arm64 contextloom-gui-darwin-amd64
 
-# 打包可双击的 .app -> dist/ContextLoom.app
+# 打包可双击的 .app -> ./ContextLoom.app
 make build-gui-macos          # 内部执行 scripts/build-macos-app.sh
 ```
 
@@ -264,7 +262,7 @@ make build-gui-macos          # 内部执行 scripts/build-macos-app.sh
 >   go build -tags production -ldflags="-s -w" -o contextloom-gui ./cmd/contextloom-gui
 > ```
 
-`scripts/build-macos-app.sh` 会把 `contextloom` 与 `contextloom-gui` 一起构建进 `dist/ContextLoom.app/Contents/MacOS/`，写入 `Info.plist`，并标记可执行。在 macOS 上，双击**裸**二进制会让 LaunchServices 用 Terminal.app 打开；`.app` 包则以正规 GUI 应用方式启动，无控制台窗口。
+`scripts/build-macos-app.sh` 会把 `contextloom` 与 `contextloom-gui` 一起构建进 `./ContextLoom.app/Contents/MacOS/`，写入 `Info.plist`，并标记可执行。在 macOS 上，双击**裸**二进制会让 LaunchServices 用 Terminal.app 打开；`.app` 包则以正规 GUI 应用方式启动，无控制台窗口。
 
 ### 3.2 Windows（本机或交叉编译——均需 mingw-w64）
 
@@ -272,19 +270,19 @@ make build-gui-macos          # 内部执行 scripts/build-macos-app.sh
 # Windows 本机（已装 mingw-w64 / MSYS2），amd64：
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
 # 从 macOS/Linux 交叉编译同样的产物（先装 mingw-w64）：
 #   Debian/Ubuntu:  sudo apt install gcc-mingw-w64-x86-64
 #   macOS (brew):   brew install mingw-w64
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
 # Windows on ARM64（aarch64 mingw-w64）：
 CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
-  -o dist/contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 
 # Makefile 捷径（交叉编译 amd64 + PE 校验）：
 make build-gui-win
@@ -296,7 +294,7 @@ PowerShell（推荐单行，避免反引号续行符在复制粘贴中出错的�
 
 ```powershell
 $env:CGO_ENABLED="1"; $env:GOOS="windows"; $env:GOARCH="amd64"
-go build -tags production -ldflags="-s -w -H windowsgui" -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED   # 清理，避免污染后续构建
 ```
@@ -306,13 +304,13 @@ Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED   # 清理，避免污染后�
 ```powershell
 $env:CGO_ENABLED="1"; $env:GOOS="windows"; $env:GOARCH="amd64"
 go build -tags production -ldflags="-s -w -H windowsgui" `
-  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+  -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 ```
 
 CMD（单行；`set X=Y&&` 等号后不留尾随空格，否则空格会进入变量值）：
 
 ```cmd
-set CGO_ENABLED=1&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o dist\contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
+set CGO_ENABLED=1&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
 ```
 
 > ⚠️ **`-H windowsgui` 是生死标志。** Windows GUI 构建漏掉它会产出 console 子系统 exe（PE `Subsystem=3`），双击必弹黑色命令行窗口。该标志由 Go **链接器按目标 `GOOS=windows` 生效**，与构建主机无关——因此从 Linux/macOS 交叉编译时，与在 Windows 本机构建同样必须带。
@@ -345,8 +343,8 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 任何 Windows GUI 构建都应校验：PE `Subsystem` 必须为 **2（GUI）**，而非 3（CONSOLE）。
 
 ```bash
-go run ./scripts/pecheck dist/contextloom-gui-windows-amd64.exe        # 期望：subsystem=2(GUI) OK
-go run ./scripts/pecheck dist/contextloom-gui-windows-amd64.exe 2      # 显式期望值
+go run ./scripts/pecheck contextloom-gui-windows-amd64.exe        # 期望：subsystem=2(GUI) OK
+go run ./scripts/pecheck contextloom-gui-windows-amd64.exe 2      # 显式期望值
 ```
 
 `scripts/pecheck` 直接读取 PE 可选头的 `Subsystem` 字段（偏移 68），不匹配时以非零码退出——因此丢失 `-H windowsgui` 会让构建失败，而不是交付一个会弹出控制台的窗口化应用。
@@ -382,7 +380,7 @@ make verify-gui      # 校验已产出的 contextloom-gui.exe
 | `make build-gui` | 为本机构建 GUI。宿主感知：Windows 宿主会加 `-H windowsgui` 并跑 `pecheck`；macOS/Linux 宿主不加该标志且跳过 `pecheck`（非 PE 目标）。 |
 | `make build-gui-win` | 交叉编译 Windows GUI（amd64，mingw-w64）+ `pecheck`。 |
 | `make verify-gui` | 对已产出的 `contextloom-gui.exe` 跑 `pecheck`。 |
-| `make build-gui-macos` | 通过 `scripts/build-macos-app.sh` 打包 `dist/ContextLoom.app`。 |
+| `make build-gui-macos` | 通过 `scripts/build-macos-app.sh` 打包 `./ContextLoom.app`。 |
 
 ## 6. 运行时布局与环境变量
 

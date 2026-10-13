@@ -140,24 +140,24 @@ The TUI is pure Go and cross-compiles natively; `CGO_ENABLED=0` produces binarie
 
 ```bash
 # macOS (Apple Silicon / Intel)
-CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-darwin-arm64 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-darwin-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-darwin-arm64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-darwin-amd64 ./cmd/contextloom
 
 # Linux (amd64 / arm64 / 386 / arm)
-CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-linux-amd64 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-linux-arm64 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-linux-386 ./cmd/contextloom
-CGO_ENABLED=0 GOOS=linux   GOARCH=arm   GOARM=7 go build -ldflags="-s -w" -o dist/contextloom-linux-armv7 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-linux-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-linux-arm64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=386   go build -ldflags="-s -w" -o contextloom-linux-386 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm   GOARM=7 go build -ldflags="-s -w" -o contextloom-linux-armv7 ./cmd/contextloom
 
 # Windows (amd64 / arm64)
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
-CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-windows-arm64.exe ./cmd/contextloom
 
 # Windows native (PowerShell/CMD): the bash env prefixes above do not work as-is —
 # use `$env:` assignment syntax instead, see docs/build.md §2.1 ("Windows native — PowerShell / CMD").
 
 # FreeBSD
-CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-amd64 ./cmd/contextloom
+CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-freebsd-amd64 ./cmd/contextloom
 ```
 
 > ⚠️ Do **not** add `-H windowsgui` to Windows TUI builds: the TUI is a console program, and that flag would break terminal interaction and output.
