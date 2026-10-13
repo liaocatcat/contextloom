@@ -33,6 +33,84 @@ func TestFindContextLoomInDir(t *testing.T) {
 	}
 }
 
+// TestFindContextLoomInDir_PlatformSuffixed：同目录查找命中交叉编译产物名
+// （Makefile 打包命令产出 contextloom-<GOOS>-<GOARCH>[.exe]，用户直接把
+// 产物放到 GUI 同目录分发 → 旧逻辑只认 contextloom/contextloom.exe 会找不到）。
+func TestFindContextLoomInDir_PlatformSuffixed(t *testing.T) {
+	// 注意：宿主非 Windows 时 .exe 候选是真实文件名（无 GOOS 检测），测试须用
+	// 与宿主无关的产物名构造目录。
+	dirs := []struct {
+		file string
+	}{
+		{"contextloom-linux-amd64"},
+		{"contextloom-darwin-arm64"},
+		{"contextloom-windows-amd64.exe"},
+	}
+	for i, d := range dirs {
+		dir := t.TempDir()
+		bin := filepath.Join(dir, d.file)
+		if err := os.WriteFile(bin, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := findContextLoomInDir(dir)
+		if !ok || got != bin {
+			t.Fatalf("场景%d: 期望命中 %s，得到 %s/%v", i, bin, got, ok)
+		}
+	}
+	// 无关文件不得命中
+	dir := t.TempDir()
+	for _, decoy := range []string{"contextloom-gui", "contextloom-agent-config.txt", "contextloom-foo-bar"} {
+		if err := os.WriteFile(filepath.Join(dir, decoy), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := findContextLoomInDir(dir); ok {
+		t.Fatal("仅无关文件时不应命中")
+	}
+	// 精确名优先于带后缀产物
+	dir2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir2, "contextloom-linux-amd64"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exact := filepath.Join(dir2, "contextloom")
+	if err := os.WriteFile(exact, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := findContextLoomInDir(dir2); !ok || got != exact {
+		t.Fatalf("精确名应优先: 得到 %s/%v", got, ok)
+	}
+}
+
+// TestSplitPlatformSuffix：平台后缀解析与白名单校验
+func TestSplitPlatformSuffix(t *testing.T) {
+	cases := []struct {
+		base   string
+		goos   string
+		goarch string
+		ok     bool
+	}{
+		{"contextloom-linux-amd64", "linux", "amd64", true},
+		{"contextloom-linux-arm64", "linux", "arm64", true},
+		{"contextloom-windows-amd64", "windows", "amd64", true},
+		{"contextloom-windows-arm64", "windows", "arm64", true},
+		{"contextloom-darwin-arm64", "darwin", "arm64", true},
+		{"contextloom-darwin-amd64", "darwin", "amd64", true},
+		{"contextloom", "", "", false},
+		{"contextloom-gui", "", "", false},
+		{"contextloom-foo-bar", "", "", false},
+		{"contextloom-linux", "", "", false},
+		{"contextloom-linux-amd64-extra", "", "", false},
+		{"contextloom-linux-", "", "", false},
+		{"contextloom--amd64", "", "", false},
+	}
+	for _, c := range cases {
+		goos, goarch, ok := splitPlatformSuffix(c.base)
+		if ok != c.ok || (c.ok && (goos != c.goos || goarch != c.goarch)) {
+			t.Errorf("splitPlatformSuffix(%q) = (%q,%q,%v)，期望 (%q,%q,%v)", c.base, goos, goarch, ok, c.goos, c.goarch, c.ok)
+		}
+	}
+}
+
 // TestFindContextLoomBin_EnvFallback：真实测试二进制目录无 contextloom → CONTEXTLOOM_BIN 兜底
 func TestFindContextLoomBin_EnvFallback(t *testing.T) {
 	dir := t.TempDir()
