@@ -1,4 +1,4 @@
-.PHONY: build run test lint clean build-gui build-gui-win verify-gui
+.PHONY: build run test lint clean build-all build-gui build-gui-win verify-gui
 
 BINARY := contextloom
 GO := go
@@ -59,6 +59,38 @@ lint:
 clean:
 	rm -f $(BINARY)
 
+# 全平台 TUI 交叉编译（纯 Go，CGO_ENABLED=0，无需任何额外工具链）。
+# 产物统一输出到当前目录，命名 contextloom-<os>-<arch>[.exe]，
+# 与 docs/build.md 的矩阵保持一致（arm 用 GOARM 区分 v5/v6/v7）。
+#
+# 历史 bug：早期用 `[ -n "$arm" ] && CGO_ENABLED=0 ... GOARM="$arm" go build`
+# 的写法，`VAR=val cmd` 前缀在 `&&` 链中会被 shell 当作独立命令解析，
+# 报 "GOARM=7: command not found"，导致全部 linux/arm 目标构建失败。
+# 现改为在子 shell 内 export，避免该展开陷阱。
+build-all:
+	@set -e; \
+	targets='darwin/amd64 darwin/arm64 \
+	  linux/amd64 linux/arm64 linux/386 \
+	  linux/arm/5 linux/arm/6 linux/arm/7 \
+	  linux/ppc64le linux/s390x linux/riscv64 linux/loong64 \
+	  linux/mips64le linux/mipsle \
+	  windows/amd64 windows/arm64 windows/386 \
+	  freebsd/amd64 freebsd/arm64 \
+	  netbsd/amd64 openbsd/amd64 dragonfly/amd64 \
+	  solaris/amd64 aix/ppc64'; \
+	for t in $$targets; do \
+	  os=$${t%%/*}; rest=$${t#*/}; arch=$${rest%%/*}; arm=""; \
+	  case "$$rest" in */*) arm=$${rest#*/};; esac; \
+	  out="contextloom-$$os-$$arch"; \
+	  if [ "$$arch" = "arm" ] && [ -n "$$arm" ]; then out="contextloom-$$os-armv$$arm"; fi; \
+	  if [ "$$os" = "windows" ]; then out="$$out.exe"; fi; \
+	  echo "==> $$os/$$arch$${arm:+/GOARM=$$arm} -> $$out"; \
+	  ( export CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch; \
+	    [ -n "$$arm" ] && export GOARM=$$arm; \
+	    $(GO) build $(GOFLAGS) -o "$$out" ./cmd/contextloom ); \
+	done; \
+	echo "✅ 全平台 TUI 构建完成"
+
 # 宿主感知的 GUI 构建：Windows 宿主产出 GUI 子系统 exe 并跑 pecheck 守护；
 # darwin/linux 宿主不加 -H windowsgui（否则链接器硬失败，见上），并跳过 pecheck
 # （非 Windows 产物是 Mach-O/ELF，不是 PE，pecheck 无从校验）。
@@ -70,10 +102,16 @@ else
 	@echo "pecheck skipped (host=$(HOST_GOOS); not a PE target)"
 endif
 
-# Windows GUI 交叉编译（macOS/Linux 主机）：必须带 -H windowsgui
-# （否则 Subsystem=3 CONSOLE，双击弹黑窗——历史教训，勿删该标志）
+# Windows GUI 交叉编译（任意主机）：必须带 -H windowsgui
+# （否则 Subsystem=3 CONSOLE，双击弹黑窗——历史教训，勿删该标志）。
+#
+# 更正历史文档错误：Windows GUI **不需要 CGO / mingw-w64**。Wails v2 的 Windows
+# 后端是纯 Go 的 COM 绑定（wailsapp/go-webview2，模块内 `import "C"` 仅出现在
+# *_darwin.go），故 CGO_ENABLED=0 即可交叉编译——实测传 bogus CC 也构建成功，
+# 印证该路径根本不调用 C 编译器。此前 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc
+# 的要求是误传，会让没有 mingw 的机器白白放弃 Windows GUI 产物。
 build-gui-win:
-	CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 		$(GO) build -tags production -ldflags="-s -w $(GUI_LDFLAGS)" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
 	$(GO) run ./scripts/pecheck contextloom-gui-windows-amd64.exe
 

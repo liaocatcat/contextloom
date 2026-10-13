@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/contextloom/contextloom-agent/pkg/types"
+	"github.com/contextloom/contextloom-agent/pkg/version"
 )
 
 // ProtocolVersion MCP 协议版本（2025-03-26 稳定版）。
@@ -110,7 +111,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
 			"name":    "contextloom",
-			"version": "2.3.0",
+			"version": version.Version,
 		},
 	})
 	if err != nil {
