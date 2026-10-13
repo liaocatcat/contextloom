@@ -6,6 +6,8 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/contextloom/contextloom-agent/internal/runtime"
 )
 
 var (
@@ -117,6 +119,76 @@ func renderMessage(msg ChatMessage, maxW int, sel bool) string {
 	}
 }
 
+// thinkingStatusSegment 状态栏多轮思考段（设计 §3.8）：policy≠off 时返回
+// "思考:strict·轮2/3"（验证轮进行中追加 ·验证中）；off/未配置返回空串（零回归）。
+// 策略名优先取 runtime 实时状态（含会话覆盖后的生效值），缺失时回退配置值。
+func thinkingStatusSegment(rt *runtime.Runtime) string {
+	if rt == nil || rt.Config == nil {
+		return ""
+	}
+	return formatThinkingSegment(rt.Config.Thinking.Policy, rt.Config.Thinking.MaxThinkRounds, thinkLiveStatus(rt))
+}
+
+// formatThinkingSegment 纯函数（便于表驱动测试）：配置策略 + 可选实时状态
+// → 状态栏段。policy 取实时值优先（含会话覆盖后的生效值），off/空返回 ""
+// （零回归）；轮次上限缺失时取配置值、再兜底 3（运行时 Normalize 同口径）。
+func formatThinkingSegment(cfgPolicy string, cfgMaxRounds int, live map[string]any) string {
+	policy := cfgPolicy
+	if p := mapStr(live, "policy"); p != "" {
+		policy = p
+	}
+	if policy == "" || policy == "off" {
+		return ""
+	}
+	seg := "思考:" + policy
+	if live != nil {
+		r := mapInt(live, "round")
+		mr := mapInt(live, "maxRound")
+		if mr <= 0 {
+			mr = cfgMaxRounds
+			if mr <= 0 {
+				mr = 3 // 运行时 Normalize 同口径
+			}
+		}
+		if r > 0 {
+			seg += fmt.Sprintf("·轮%d/%d", r, mr)
+		}
+		if b, _ := live["verifying"].(bool); b {
+			seg += "·验证中"
+		}
+	}
+	return seg
+}
+
+// shortenThinkingSegment 窄终端自适应（§3.8 风险项：轮次信息优先）：
+// 完整段放不下时，先丢"·验证中"，再丢"思考:策略"前缀只留"轮N/M"；
+// 连轮次都放不下（或无轮次）则返回 ""（省略整段）。
+func shortenThinkingSegment(seg string, avail int) string {
+	if avail <= 0 {
+		return ""
+	}
+	if lipgloss.Width(seg) <= avail {
+		return seg
+	}
+	// 1) 去验证标记（尾缀）
+	if s := strings.TrimSuffix(seg, "·验证中"); s != seg {
+		seg = s
+		if lipgloss.Width(seg) <= avail {
+			return seg
+		}
+	}
+	// 2) 轮次信息优先：只保留 "轮N/M" 段
+	if i := strings.LastIndex(seg, "·轮"); i >= 0 {
+		round := seg[i+len("·"):] // "·" 为多字节字符，按字节长度切片
+		if lipgloss.Width(round) <= avail {
+			return round
+		}
+		return ""
+	}
+	// 3) 仅策略名：放不下则省略
+	return ""
+}
+
 func fmtInput(s string, cursor, maxW int) string {
 	if maxW < 10 {
 		maxW = 10
@@ -151,7 +223,7 @@ func renderStatusBar(m *model) string {
 			modeLabel = "\U0001f3af goal"
 		}
 	}
-	left := fmt.Sprintf(" \u6a21\u578b:%s \u00b7 %s \u00b7 \u6df1\u5ea6:%s \u00b7 \u9608\u503c:%.0f  ", m.modelID, modeLabel, m.reasoningEffort, m.threshold)
+	left := fmt.Sprintf(" \u6a21\u578b:%s \u00b7 %s \u00b7 \u6df1\u5ea6:%s \u00b7 \u9608\u503c:%.0f", m.modelID, modeLabel, m.reasoningEffort, m.threshold)
 	var right string
 	switch m.mode {
 	case modeChat:
@@ -188,6 +260,18 @@ func renderStatusBar(m *model) string {
 			right += usage
 		}
 	}
+	// 多轮思考段（设计 §3.8）：policy≠off 才追加（默认 off 零回归不显示）。
+	// 窄终端自适应（§3.8 风险项：轮次信息优先）：空间不足先丢验证标记、再丢
+	// 策略名，保留 轮N/M；m.width 未初始化（0）时全量展示。
+	if seg := thinkingStatusSegment(m.rt); seg != "" {
+		if m.width > 0 {
+			seg = shortenThinkingSegment(seg, m.width-lipgloss.Width(left)-lipgloss.Width(right)-4)
+		}
+		if seg != "" {
+			left += " · " + seg
+		}
+	}
+	left += "  "
 	used := lipgloss.Width(left) + lipgloss.Width(right)
 	mid := ""
 	if m.width > used+4 {

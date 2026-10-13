@@ -33,6 +33,7 @@ type Config struct {
 	Channels        ChannelsConfig             `yaml:"channels"`
 	Sandbox         SandboxConfig              `yaml:"sandbox"`
 	Preview         PreviewConfig              `yaml:"preview"`
+	Thinking        ThinkingConfig             `yaml:"thinking"`
 
 	// ConfigPath 实际加载的配置文件路径（运行时字段，不入 yaml）。
 	// 可能位于可执行文件目录（部署）或启动目录（开发），供 /config 与提示词展示。
@@ -120,6 +121,12 @@ type legacyModelConfig struct {
 	VisionModel    string   `yaml:"vision_model"`
 	SupportsVision bool     `yaml:"supports_vision"`
 	SendEffort     *bool    `yaml:"send_effort"`
+
+	// 生成参数随迁移携带（与 ModelPreset 同 yaml 映射）
+	MaxOutputTokens int    `yaml:"max_output_tokens"`
+	MaxInputTokens  int    `yaml:"max_input_tokens"`
+	ThinkingLength  string `yaml:"thinking_length"`
+	ThinkingEnabled *bool  `yaml:"thinking_enabled"`
 }
 
 // ActiveModel 返回当前生效的模型配置（唯一事实来源）。
@@ -225,6 +232,27 @@ type ModelPreset struct {
 	VisionModel    string   `yaml:"vision_model"`
 	SupportsVision bool     `yaml:"supports_vision"`
 	SendEffort     *bool    `yaml:"send_effort"` // nil=默认 true
+
+	// 生成参数（对标 DeepSeek Harness：max_tokens 与 contextWindow 解耦）：
+	// 输出/输入上限独立于 MaxContext，思考长度与思考开关独立控制思考行为。
+	MaxOutputTokens int    `yaml:"max_output_tokens"` // 0=未设置（回退 MaxContext，保持现状语义）；>0=单次模型输出上限（思考过程计入该预算）
+	MaxInputTokens  int    `yaml:"max_input_tokens"`  // 0=未设置（回退 MaxContext）；>0=单次请求输入预算上限
+	ThinkingLength  string `yaml:"thinking_length"`   // ""=继承 cli_defaults.effort；可选 off/low/medium/high/xhigh/max
+	ThinkingEnabled *bool  `yaml:"thinking_enabled"`  // nil=不显式发送 thinking 字段（保持现状）；false=关闭思考
+}
+
+// thinkingLengthOptions 思考长度合法档位（首项 ""=继承 cli_defaults.effort）。
+// ConfigSchema 枚举 / Apply 写入校验 / Validate 软校验共用同一清单，杜绝三处漂移。
+var thinkingLengthOptions = []string{"", "off", "low", "medium", "high", "xhigh", "max"}
+
+// validThinkingLength 判断思考长度档位是否合法。
+func validThinkingLength(s string) bool {
+	for _, opt := range thinkingLengthOptions {
+		if s == opt {
+			return true
+		}
+	}
+	return false
 }
 
 type HarnessConfig struct {
@@ -296,6 +324,48 @@ type CLIDefaultsConfig struct {
 	//  - Windows 终端：Alt+Enter 被系统占用（全屏） → 建议 ctrl+j
 	//  - 其他 Unix 终端（iTerm2/Terminal.app/xterm）：两者皆可
 	KeyNewline string `yaml:"key_newline"`
+}
+
+// ThinkingConfig 多轮思考触发策略（顶层 thinking: 分组；轮次面"想几轮/是否验证"）。
+// 与参数面 model.thinking_length（"每轮想多长"）正交：本组管轮次结构与收尾拦截，
+// Group 名"思考策略"与"模型"分组区隔。零值=off/现状（零回归）：空串归一
+// （""→off/off/none/max）与 0 值语义（0→运行时取 3/60/2）由运行时 Normalize 负责。
+type ThinkingConfig struct {
+	Policy              string `yaml:"policy"`               // ""|off|auto|strict：off=不干预（现状）；auto=复杂任务软触发；strict=强制验证轮并拦截收尾
+	MinThinkRounds      int    `yaml:"min_think_rounds"`     // 0-20（0=不强制）：复杂任务最少思考轮数（strict 硬下限 / auto 软下限）
+	MaxThinkRounds      int    `yaml:"max_think_rounds"`     // 0-20（0→运行时取 3）：续轮注入总上限（拦截+nudge；工具执行轮不受限）
+	VerifyPass          string `yaml:"verify_pass"`          // ""|off|auto|on：off=无验证轮；auto=复杂触发；on=收尾必验（含 simple）
+	ComplexityThreshold int    `yaml:"complexity_threshold"` // 0-100（0→运行时取 60）：复杂度评分阈值（≥阈值=复杂）
+	NudgeEnabled        bool   `yaml:"nudge_enabled"`        // 续思提示注入开关（M6）
+	NudgeMax            int    `yaml:"nudge_max"`            // 0-10（0→运行时取 2）：nudge 单独上限
+	RoundEffortPolicy   string `yaml:"round_effort_policy"`  // ""|none|escalate：none=保持（现状）；escalate=验证轮升档
+	RoundEffortCap      string `yaml:"round_effort_cap"`     // ""|low|medium|high|xhigh|max：升档封顶（仅 escalate 生效）
+}
+
+// thinking.* 选项清单（ConfigSchema / Sanitized / applyOne / Validate 共用，杜绝多处漂移）。
+var (
+	thinkingPolicyOptions    = []string{"off", "auto", "strict"}
+	verifyPassOptions        = []string{"off", "auto", "on"}
+	roundEffortPolicyOptions = []string{"none", "escalate"}
+	roundEffortCapOptions    = []string{"low", "medium", "high", "xhigh", "max"}
+)
+
+// inList 判断字符串是否命中合法选项清单（枚举校验共用）。
+func inList(s string, opts []string) bool {
+	for _, opt := range opts {
+		if s == opt {
+			return true
+		}
+	}
+	return false
+}
+
+// thinkingNorm 空值归一：""→默认档（Sanitized 输出与运行时 Normalize 同口径）。
+func thinkingNorm(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 // DefaultConfigPath 返回默认配置文件路径（完整查找链，从高到低）：
@@ -434,6 +504,58 @@ func (c *Config) Validate() error {
 	if am.Temperature != nil && (*am.Temperature < 0 || *am.Temperature > 2) {
 		return fmt.Errorf("model.temperature 必须在 [0, 2] 范围内")
 	}
+	// 生成参数软校验：只拦明显误配（负值/非法档位/单值超窗口 4 倍）。
+	// 输出+输入之和超窗口不报错——模型窗口差异大（128K~1M），动态预算由运行时
+	// 按实际用量钳制；配置层硬拒会误伤"给大上限、运行时按需收敛"的用法。
+	if am.MaxOutputTokens < 0 {
+		return fmt.Errorf("model.max_output_tokens 不能为负（0=不限制）")
+	}
+	if am.MaxInputTokens < 0 {
+		return fmt.Errorf("model.max_input_tokens 不能为负（0=不限制）")
+	}
+	if am.ThinkingLength != "" && !validThinkingLength(am.ThinkingLength) {
+		return fmt.Errorf("model.thinking_length 非法取值 %q：合法取值 %v", am.ThinkingLength, thinkingLengthOptions)
+	}
+	if am.MaxContext > 0 {
+		if am.MaxOutputTokens > am.MaxContext*4 {
+			return fmt.Errorf("model.max_output_tokens=%d 超过最大上下文 %d 的 4 倍，疑似误配", am.MaxOutputTokens, am.MaxContext)
+		}
+		if am.MaxInputTokens > am.MaxContext*4 {
+			return fmt.Errorf("model.max_input_tokens=%d 超过最大上下文 %d 的 4 倍，疑似误配", am.MaxInputTokens, am.MaxContext)
+		}
+	}
+	// thinking.* 多轮思考触发策略软校验：枚举 + 范围 + 交叉校验（min>max 且均>0 报错）。
+	// policy=off（含空值归一）时其余字段不做硬拒绝——软裁决：运行时 policy 优先，
+	// GUI 提示"不生效"（对齐参数面互斥软裁决现状）。
+	if c.Thinking.Policy != "" && !inList(c.Thinking.Policy, thinkingPolicyOptions) {
+		return fmt.Errorf("thinking.policy 非法取值 %q：合法取值 %v", c.Thinking.Policy, thinkingPolicyOptions)
+	}
+	if thinkingNorm(c.Thinking.Policy, "off") != "off" {
+		if c.Thinking.VerifyPass != "" && !inList(c.Thinking.VerifyPass, verifyPassOptions) {
+			return fmt.Errorf("thinking.verify_pass 非法取值 %q：合法取值 %v", c.Thinking.VerifyPass, verifyPassOptions)
+		}
+		if c.Thinking.RoundEffortPolicy != "" && !inList(c.Thinking.RoundEffortPolicy, roundEffortPolicyOptions) {
+			return fmt.Errorf("thinking.round_effort_policy 非法取值 %q：合法取值 %v", c.Thinking.RoundEffortPolicy, roundEffortPolicyOptions)
+		}
+		if c.Thinking.RoundEffortCap != "" && !inList(c.Thinking.RoundEffortCap, roundEffortCapOptions) {
+			return fmt.Errorf("thinking.round_effort_cap 非法取值 %q：合法取值 %v", c.Thinking.RoundEffortCap, roundEffortCapOptions)
+		}
+		if c.Thinking.MinThinkRounds < 0 || c.Thinking.MinThinkRounds > 20 {
+			return fmt.Errorf("thinking.min_think_rounds=%d 必须在 [0, 20] 范围内", c.Thinking.MinThinkRounds)
+		}
+		if c.Thinking.MaxThinkRounds < 0 || c.Thinking.MaxThinkRounds > 20 {
+			return fmt.Errorf("thinking.max_think_rounds=%d 必须在 [0, 20] 范围内", c.Thinking.MaxThinkRounds)
+		}
+		if c.Thinking.ComplexityThreshold < 0 || c.Thinking.ComplexityThreshold > 100 {
+			return fmt.Errorf("thinking.complexity_threshold=%d 必须在 [0, 100] 范围内", c.Thinking.ComplexityThreshold)
+		}
+		if c.Thinking.NudgeMax < 0 || c.Thinking.NudgeMax > 10 {
+			return fmt.Errorf("thinking.nudge_max=%d 必须在 [0, 10] 范围内", c.Thinking.NudgeMax)
+		}
+		if c.Thinking.MinThinkRounds > 0 && c.Thinking.MaxThinkRounds > 0 && c.Thinking.MinThinkRounds > c.Thinking.MaxThinkRounds {
+			return fmt.Errorf("thinking.min_think_rounds=%d 不能大于 thinking.max_think_rounds=%d", c.Thinking.MinThinkRounds, c.Thinking.MaxThinkRounds)
+		}
+	}
 	return nil
 }
 
@@ -487,11 +609,15 @@ func ConfigSchema() []FieldSchema {
 		{Key: "model.endpoint", Label: "API 端点", Type: "text", Group: "模型", Desc: "OpenAI 兼容 API 地址（写回当前激活预设）"},
 		{Key: "model.api_key", Label: "API Key", Type: "password", Group: "模型", Desc: "显示脱敏；保存时留空/不改则不覆盖真实 Key（也可用环境变量 DEEPSEEK_API_KEY）"},
 		{Key: "model.max_context", Label: "最大上下文 (tokens)", Type: "number", Group: "模型", Default: 131072, Desc: "token 窗口上限", Min: f64p(8192), Max: f64p(100000000), Step: 1024},
+		{Key: "model.max_output_tokens", Label: "最大输出 (tokens)", Type: "number", Group: "模型", Default: 0, Desc: "0=不限制（自动取最大上下文）；>0=单次模型输出 token 上限（与最大上下文解耦，思考过程计入该预算）", Min: f64p(0), Max: f64p(100000000), Step: 1024},
+		{Key: "model.max_input_tokens", Label: "最大输入 (tokens)", Type: "number", Group: "模型", Default: 0, Desc: "0=不限制（取最大上下文）；>0=单次请求输入 token 预算上限", Min: f64p(0), Max: f64p(100000000), Step: 1024},
 		{Key: "model.top_p", Label: "Top P", Type: "number", Group: "模型", Default: 0.95, Desc: "核采样 [0,1]", Min: f64p(0), Max: f64p(1), Step: 0.05},
 		{Key: "model.temperature", Label: "温度", Type: "number", Group: "模型", Default: 1.0, Desc: "采样温度 [0,2]", Min: f64p(0), Max: f64p(2), Step: 0.1},
 		{Key: "model.vision_model", Label: "识图模型", Type: "text", Group: "模型", Default: "", Desc: "输入含图片时本轮自动切换（空=沿用主模型）"},
 		{Key: "model.supports_vision", Label: "支持多模态识图", Type: "bool", Group: "模型", Default: false, Desc: "OpenAI 兼容视觉端点才开启（DeepSeek 官方为纯文本，发图片会 400；关闭时图片降级为路径文本）"},
 		{Key: "model.send_effort", Label: "发送思考强度参数", Type: "bool", Group: "模型", Default: true, Desc: "是否向 API 发送 reasoning_effort（默认打开；个别 OpenAI 兼容服务严格校验未知字段时关闭）"},
+		{Key: "model.thinking_length", Label: "思考长度", Type: "select", Group: "模型", Default: "", Enums: append([]string(nil), thinkingLengthOptions...), Desc: "思考长度档位：off 关闭思考；空=沿用 CLI 默认思考深度（cli_defaults.effort）"},
+		{Key: "model.thinking_enabled", Label: "启用模型思考", Type: "bool", Group: "模型", Default: true, Desc: "是否启用模型思考（false 时向 API 发送 thinking:{type:disabled}；仅 DeepSeek 官方通道生效）"},
 		{Key: "harness.score_threshold", Label: "检索分数阈值", Type: "number", Group: "Harness 检索", Default: 50.0, Desc: "低于该分的块不返回", Min: f64p(0), Max: f64p(100), Step: 1},
 		{Key: "harness.decay_factor", Label: "索引衰减因子", Type: "number", Group: "Harness 检索", Default: 0.9, Desc: "/compress 时旧块权重衰减", Min: f64p(0.01), Max: f64p(1), Step: 0.05},
 		{Key: "harness.anchor_ratio", Label: "锚点比例", Type: "number", Group: "Harness 检索", Default: 0.2, Desc: "锚点块占比", Min: f64p(0), Max: f64p(1), Step: 0.05},
@@ -531,6 +657,16 @@ func ConfigSchema() []FieldSchema {
 		{Key: "tools.approval_mode", Label: "审批预设", Type: "select", Group: "工具", Default: "standard", Enums: []string{"standard", "permissive", "strict"}, Desc: "standard 谨慎 / permissive 全自动 / strict 全确认"},
 		{Key: "preview.plantuml_server", Label: "PlantUML 服务器", Type: "text", Group: "预览", Default: "https://www.plantuml.com/plantuml", Desc: "plantuml-server 根地址（可配内网自建服务，如 http://127.0.0.1:8080/plantuml）；Markdown 预览中的 plantuml 代码块经本地代理渲染为 SVG"},
 		{Key: "preview.plantuml_enabled", Label: "PlantUML 渲染", Type: "bool", Group: "预览", Default: true, Desc: "true=plantuml 代码块渲染为图（失败兜底显示源码）；false=按普通代码块展示"},
+		// ── 思考策略（多轮思考触发 M1-M12 轮次面；与"模型"分组 thinking_length 参数面正交）──
+		{Key: "thinking.policy", Label: "思考策略", Type: "select", Group: "思考策略", Default: "off", Enums: append([]string(nil), thinkingPolicyOptions...), Desc: "off=不干预（现状）；auto=复杂任务软触发；strict=强制验证轮并拦截收尾"},
+		{Key: "thinking.min_think_rounds", Label: "最少思考轮数", Type: "number", Group: "思考策略", Default: 0, Min: f64p(0), Max: f64p(20), Step: 1, Desc: "复杂任务最少思考轮数（0=不强制；建议 3=首探+执行+验证）"},
+		{Key: "thinking.max_think_rounds", Label: "思考轮上限", Type: "number", Group: "思考策略", Default: 3, Min: f64p(1), Max: f64p(20), Step: 1, Desc: "续轮注入总上限（拦截+nudge；工具执行轮不受限；0=未设置→运行时取 3）"},
+		{Key: "thinking.verify_pass", Label: "验证轮策略", Type: "select", Group: "思考策略", Default: "off", Enums: append([]string(nil), verifyPassOptions...), Desc: "off=无验证轮；auto=复杂任务触发；on=收尾必验（含 simple）"},
+		{Key: "thinking.complexity_threshold", Label: "复杂度阈值", Type: "number", Group: "思考策略", Default: 60, Min: f64p(0), Max: f64p(100), Step: 1, Desc: "复杂度评分阈值 0-100（≥阈值=复杂；0=未设置→运行时取 60）"},
+		{Key: "thinking.nudge_enabled", Label: "续思提示", Type: "bool", Group: "思考策略", Default: false, Desc: "复杂任务续思提示注入（结构性催轮，不等模型自觉）"},
+		{Key: "thinking.nudge_max", Label: "续思提示上限", Type: "number", Group: "思考策略", Default: 2, Min: f64p(0), Max: f64p(10), Step: 1, Desc: "nudge 单独上限（0=未设置→运行时取 2）"},
+		{Key: "thinking.round_effort_policy", Label: "轮次档位策略", Type: "select", Group: "思考策略", Default: "none", Enums: append([]string(nil), roundEffortPolicyOptions...), Desc: "none=保持（现状）；escalate=验证轮升档"},
+		{Key: "thinking.round_effort_cap", Label: "升档封顶", Type: "select", Group: "思考策略", Default: "max", Enums: append([]string(nil), roundEffortCapOptions...), Desc: "验证轮升档封顶（仅 escalate 生效）"},
 	}
 }
 
@@ -554,6 +690,25 @@ func (c *Config) Sanitized() map[string]any {
 	if am.SendEffort != nil {
 		m["model.send_effort"] = *am.SendEffort
 	}
+	m["model.max_output_tokens"] = am.MaxOutputTokens
+	m["model.max_input_tokens"] = am.MaxInputTokens
+	m["model.thinking_length"] = am.ThinkingLength
+	// ThinkingEnabled 为 nil（未显式配置）时输出 true，与 schema Default 一致
+	m["model.thinking_enabled"] = true
+	if am.ThinkingEnabled != nil {
+		m["model.thinking_enabled"] = *am.ThinkingEnabled
+	}
+	// thinking.* 多轮思考触发策略（空串归一为运行时默认档；数值 0=未设置原样输出，
+	// 归一由运行时 Normalize 负责——配置层不做非零默认写入，保证零回归）
+	m["thinking.policy"] = thinkingNorm(c.Thinking.Policy, "off")
+	m["thinking.min_think_rounds"] = c.Thinking.MinThinkRounds
+	m["thinking.max_think_rounds"] = c.Thinking.MaxThinkRounds
+	m["thinking.verify_pass"] = thinkingNorm(c.Thinking.VerifyPass, "off")
+	m["thinking.complexity_threshold"] = c.Thinking.ComplexityThreshold
+	m["thinking.nudge_enabled"] = c.Thinking.NudgeEnabled
+	m["thinking.nudge_max"] = c.Thinking.NudgeMax
+	m["thinking.round_effort_policy"] = thinkingNorm(c.Thinking.RoundEffortPolicy, "none")
+	m["thinking.round_effort_cap"] = thinkingNorm(c.Thinking.RoundEffortCap, "max")
 	m["harness.score_threshold"] = c.Harness.ScoreThreshold
 	m["harness.decay_factor"] = c.Harness.DecayFactor
 	m["harness.anchor_ratio"] = c.Harness.AnchorRatio
@@ -710,6 +865,62 @@ func (c *Config) applyOne(key string, val any) error {
 			} // 无预设：忽略
 		})
 		return nil
+	case "model.max_output_tokens":
+		return setIntPreset(c, key, val, func(m *ModelPreset, n int) {
+			if m != nil {
+				m.MaxOutputTokens = n
+			} // 无预设：忽略
+		})
+	case "model.max_input_tokens":
+		return setIntPreset(c, key, val, func(m *ModelPreset, n int) {
+			if m != nil {
+				m.MaxInputTokens = n
+			} // 无预设：忽略
+		})
+	case "model.thinking_length":
+		s, ok := val.(string)
+		if !ok {
+			return fmt.Errorf("%s 需要字符串", key)
+		}
+		if !validThinkingLength(s) {
+			return fmt.Errorf("%s 非法取值 %q：合法取值 %v", key, s, thinkingLengthOptions)
+		}
+		writePreset(func(m *ModelPreset) {
+			if m != nil {
+				m.ThinkingLength = s
+			} // 无预设：忽略
+		})
+		return nil
+	case "model.thinking_enabled":
+		var v bool
+		if err := setBool(&v, key, val); err != nil {
+			return err
+		}
+		writePreset(func(m *ModelPreset) {
+			if m != nil {
+				m.ThinkingEnabled = &v
+			} // 无预设：忽略
+		})
+		return nil
+	// thinking.* 多轮思考触发策略（枚举走 setEnum 校验；数值 setInt；布尔 setBool）
+	case "thinking.policy":
+		return setEnum(&c.Thinking.Policy, key, val, thinkingPolicyOptions)
+	case "thinking.min_think_rounds":
+		return setInt(&c.Thinking.MinThinkRounds, key, val)
+	case "thinking.max_think_rounds":
+		return setInt(&c.Thinking.MaxThinkRounds, key, val)
+	case "thinking.verify_pass":
+		return setEnum(&c.Thinking.VerifyPass, key, val, verifyPassOptions)
+	case "thinking.complexity_threshold":
+		return setInt(&c.Thinking.ComplexityThreshold, key, val)
+	case "thinking.nudge_enabled":
+		return setBool(&c.Thinking.NudgeEnabled, key, val)
+	case "thinking.nudge_max":
+		return setInt(&c.Thinking.NudgeMax, key, val)
+	case "thinking.round_effort_policy":
+		return setEnum(&c.Thinking.RoundEffortPolicy, key, val, roundEffortPolicyOptions)
+	case "thinking.round_effort_cap":
+		return setEnum(&c.Thinking.RoundEffortCap, key, val, roundEffortCapOptions)
 	case "harness.score_threshold":
 		return setF64(&c.Harness.ScoreThreshold, key, val)
 	case "harness.decay_factor":
@@ -833,6 +1044,19 @@ func setInt(dst *int, key string, val any) error {
 		return fmt.Errorf("%s 需要整数", key)
 	}
 	*dst = n
+	return nil
+}
+
+// setEnum 枚举写入：命中合法选项清单才写入（错误信息含全部合法取值）。
+func setEnum(dst *string, key string, val any, opts []string) error {
+	s, ok := val.(string)
+	if !ok {
+		return fmt.Errorf("%s 需要字符串", key)
+	}
+	if !inList(s, opts) {
+		return fmt.Errorf("%s 非法取值 %q：合法取值 %v", key, s, opts)
+	}
+	*dst = s
 	return nil
 }
 
@@ -968,6 +1192,12 @@ func (c *Config) migrateLegacyModel(data []byte) {
 		VisionModel:    m.VisionModel,
 		SupportsVision: m.SupportsVision,
 		SendEffort:     m.SendEffort,
+
+		// 生成参数随迁移携带（避免旧配置升级后丢失输出/输入/思考长度设置）
+		MaxOutputTokens: m.MaxOutputTokens,
+		MaxInputTokens:  m.MaxInputTokens,
+		ThinkingLength:  m.ThinkingLength,
+		ThinkingEnabled: m.ThinkingEnabled,
 	}}
 }
 
@@ -1004,7 +1234,9 @@ func (c *Config) applyDefaults() {
 		c.ActiveModelName = c.Models[0].Name
 	}
 	// 补齐预设默认值（旧 model: 节迁移/用户省略字段场景）：
-	// MaxContext 缺省 131072；TopP/Temperature/SendEffort 缺省指针。
+	// MaxContext 缺省 131072；TopP/Temperature/SendEffort/ThinkingEnabled 缺省指针。
+	// MaxOutputTokens/MaxInputTokens 缺省 0（不限制，回退 MaxContext）、ThinkingLength
+	// 缺省 ""（继承 cli_defaults.effort）——不做非零默认，保证行为零回归。
 	for i := range c.Models {
 		if c.Models[i].MaxContext == 0 {
 			c.Models[i].MaxContext = 131072
@@ -1018,6 +1250,12 @@ func (c *Config) applyDefaults() {
 		if c.Models[i].SendEffort == nil {
 			v := true
 			c.Models[i].SendEffort = &v
+		}
+		if c.Models[i].ThinkingEnabled == nil {
+			// nil=不显式发送 thinking 字段；缺省指针 true 与 schema Default 一致，
+			// 显式 false（关闭思考）不被默认值覆盖。
+			v := true
+			c.Models[i].ThinkingEnabled = &v
 		}
 	}
 	if c.Harness.ScoreThreshold == 0 {
@@ -1120,4 +1358,5 @@ func (c *Config) applyDefaults() {
 	if c.Context.HardRatio >= c.Context.SafetyRatio {
 		c.Context.SafetyRatio = c.Context.HardRatio + (1-c.Context.HardRatio)/2
 	}
+	// thinking.* 不做默认写入：零值=off/现状（空串归一由运行时 Normalize 负责，保证零回归）。
 }

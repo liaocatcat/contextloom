@@ -323,12 +323,29 @@ async function connectProj(dir) {
     if (state.activeDir !== dir) {
       const sid = env.data && env.data.sessionId;
       if (env.event === "agent.stream") {
-        conn.activeStreams++;
-        const bs = conn.background || (conn.background = {});
-        const sidKey = sid || "";
-        const b = bs[sidKey] || (bs[sidKey] = { buf: "", streaming: true, streamId: env.data.streamId });
-        b.buf += env.data.delta;
+        const streamId = env.data && env.data.streamId;
+        // 已显式停止的流：残留 delta 一律不入后台缓冲（否则切回该项目时
+        // switchActiveConn 合并 + 恢复渲染 → "停下的对话被重新激活"）
+        if ((streamId != null && state.stoppedStreams.has(streamId)) ||
+            (sid && state.stoppedSessions.has(sid))) {
+          if (streamId != null) state.stoppedStreams.set(streamId, sid || "");
+        } else {
+          conn.activeStreams++;
+          const bs = conn.background || (conn.background = {});
+          const sidKey = sid || "";
+          const b = bs[sidKey] || (bs[sidKey] = { buf: "", streaming: true, streamId });
+          b.buf += env.data.delta;
+        }
       } else if (env.event === "agent.done") {
+        // 镜像 handleEvent 的停止标记清理：已停止流的 done 仅用于解除
+        // 停止标记（sendMessage 等待收尾），不驱动任何渲染。
+        const streamId = env.data && env.data.streamId;
+        if (streamId != null && state.stoppedStreams.has(streamId)) {
+          state.stoppedStreams.delete(streamId);
+          if (sid) state.stoppedSessions.delete(sid);
+        } else if (sid && state.stoppedSessions.has(sid)) {
+          state.stoppedSessions.delete(sid);
+        }
         const bs = conn.background;
         if (bs) delete bs[sid || ""];
         if (conn.activeStreams > 0) conn.activeStreams--;
@@ -568,29 +585,43 @@ function handleEvent(env) {
       applyCtxUsage(env.data);
       break;
     case "ctx.compressed": {
-      // 手动压缩（快捷按钮 /compact）后重绘消息区为压缩态：
-      // 后端压缩只改内存 conversationHistory，GUI 消息区原本显示的是
-      // 事件日志完整重放（GetDisplayHistory）——压缩后不重绘的话，
-      // 用户看到界面"毫无变化"（显示问题根因）。
-      // 现在收到 ctx.compressed 事件后，用压缩后的消息列表渲染消息区：
-      // 首条 [历史摘要] + 保留消息，压缩立刻在界面上可见。
+      // 压缩事件（手动 /compact + 阈值自动压缩共用）：
+      // 压缩只作用于 AI 上下文（后端 conversationHistory），用户可见历史
+      // （事件日志）从不删减——所以这里【不】再按事件携带的消息列表渲染
+      // 压缩态（旧实现会把消息区重绘成"摘要+保留消息"，看起来历史变少，
+      // 需切走再切回才恢复，正是用户反馈的缺陷）。
+      // 现在收到事件后：① 追加一条系统提示（压缩结果文案，auto=true 时
+      // 说明是自动压缩）；② 主动调 chat.history 重拉该会话完整历史重绘
+      // 消息区（与切走再切回等效，但无需用户操作）；③ 刷新状态栏占比。
+      // 后端事件携带的 messages（完整历史）仅作兜底：拉取失败时用它渲染，
+      // 避免界面停留在旧状态。
       const d = env.data || {};
       const sid = d.sessionId;
-      if (sid && sid !== curSession()) break; // 非当前会话：只刷新状态栏，不重绘
-      if (Array.isArray(d.messages)) {
-        // 压缩态渲染：摘要行做成 system 样式（标识压缩发生），其余按消息渲染
-        const msgs = d.messages.map(m => {
-          // [历史摘要] 是注入的压缩摘要（role=user），渲染为 system 样式
-          // 以示"这是自动生成的摘要"，区别于真实用户消息
-          if (m.role === "user" && String(m.content || "").startsWith("[历史摘要]")) {
-            return { role: "system", content: String(m.content || "") };
-          }
-          return m;
-        });
-        renderMessages(msgs);
-        appendSystem(`📦 ${d.message || "上下文已压缩"}`);
+      const isAuto = !!d.auto;
+      // 非当前会话：不重绘当前消息区（避免串台），仅刷新状态栏。
+      // 该会话若切回，switchSession 走 loadSession 完整历史，无显示问题。
+      if (sid && sid !== curSession()) { if (d.usage) applyCtxString(d.usage); break; }
+      if (isAuto) {
+        appendSystem(`📦 ${d.message || "上下文已自动压缩"}`);
+      } else if (d.message) {
+        appendSystem(`📦 ${d.message}`);
       }
       if (d.usage) applyCtxString(d.usage);
+      // 压缩后自动刷新：重拉完整历史（事件日志重放），消息区保持完整显示
+      // （代际保护：重绘前确认用户没有切走会话）。
+      const target = sid || state.sessionId;
+      if (target) {
+        req("chat.history", { uuid: target }).then(r => {
+          if ((sid || state.sessionId) !== curSession()) return;
+          if (Array.isArray(r && r.messages)) renderMessages(r.messages);
+        }).catch(() => {
+          // 拉取失败兜底：用事件携带的完整历史渲染（保证刷新语义不丢）
+          if (Array.isArray(d.messages)) {
+            const msgs = d.messages.filter(m => !(m.partial && (state.streaming || state.backgroundStreams[target])));
+            renderMessages(msgs);
+          }
+        });
+      }
       break;
     }
     case "orchestration.progress":
@@ -1274,9 +1305,15 @@ async function switchActiveConn(dir) {
   // loadSession，后台流已实时累积，无需等待后端）。
   if (exist && exist.background) {
     for (const sid of Object.keys(exist.background)) {
-      if (!state.backgroundStreams[sid]) {
-        state.backgroundStreams[sid] = exist.background[sid];
+      if (state.backgroundStreams[sid]) continue;
+      const b = exist.background[sid];
+      // 用户已显式停止的流不合并回全局（防止切回项目时被恢复成
+      // "● 生成中"——复活已停止的对话）
+      if ((b.streamId != null && state.stoppedStreams.has(b.streamId)) ||
+          (sid && state.stoppedSessions.has(sid))) {
+        continue;
       }
+      state.backgroundStreams[sid] = b;
     }
   }
   // 子任务视图恢复：连接在其非活跃期间持续聚合的 § 信号（conn.subTasks）
@@ -1347,7 +1384,9 @@ async function afterProjectSwitch(dir) {
     const sid = state.sessionId;
     if (sid && state.streaming && state.streamBuf) {
       const bs = oldConn.background || (oldConn.background = {});
-      if (!bs[sid]) bs[sid] = { buf: state.streamBuf, streaming: true };
+      // 归档携带 streamId（与 switchSession/closeTab 归档一致）：切回后
+      // 该流再被用户停止时可精确标记 stoppedStreams（否则停止标记对不上）
+      if (!bs[sid]) bs[sid] = { buf: state.streamBuf, streaming: true, streamId: state.streamId };
     }
     if (state.subTasks.size > 0) {
       oldConn.subTasks = state.subTasks;
@@ -2846,7 +2885,8 @@ const CMD_LIST = [
   { name: "/agent", desc: "打开 Agent 观察面板" },
   { name: "/status", desc: "显示状态信息" },
   { name: "/theme", desc: "切换主题" },
-  { name: "/effort <level>", desc: "设置思考深度 (low/medium/high/xhigh/max)" },
+  { name: "/effort <level>", desc: "设置思考深度 (off/low/medium/high/xhigh/max)；off=关闭思考" },
+  { name: "/maxlen <output|input> <tokens>", desc: "设置输出/输入长度上限（0=不限制，与上下文解耦）" },
   { name: "/attach", desc: "选择附件文件" },
   { name: "/about", desc: "关于 ContextLoom" },
   { name: "/mcp", desc: "查看 MCP 状态" },
@@ -2872,7 +2912,7 @@ async function handleCommand(cmd) {
       appendSystem("已清空显示");
       return true;
     case "help":
-      appendSystem("命令: /mode /new /clear /stop /ctx /compact /config /paths /history /skills /load /rename /delete /fs /logs /agent /status /theme /effort /attach /about /mcp /exit");
+      appendSystem("命令: /mode /new /clear /stop /ctx /compact /config /paths /history /skills /load /rename /delete /fs /logs /agent /status /theme /effort /maxlen /attach /about /mcp /exit");
       return true;
     case "stop":
       stopStream(state.sessionId);
@@ -2949,13 +2989,61 @@ async function handleCommand(cmd) {
       toggleTheme();
       return true;
     case "effort":
-      if (!["low", "medium", "high", "xhigh", "max"].includes(arg)) {
-        toast("用法: /effort low|medium|high|xhigh|max", "warn");
+      if (!["off", "low", "medium", "high", "xhigh", "max"].includes(arg)) {
+        toast("用法: /effort off/low/medium/high/xhigh/max", "warn");
         return true;
       }
-      try { await req("model.set", { effort: arg }); appendSystem(`思考深度已设为 ${arg}`); refreshModelInfo(); }
-      catch (e) { appendSystem("设置失败: " + msgOf(e)); }
+      try {
+        await req("model.set", { effort: arg });
+        appendSystem(arg === "off" ? "已关闭思考（不发送 reasoning_effort）" : `思考深度已设为 ${arg}`);
+        refreshModelInfo();
+      } catch (e) { appendSystem("设置失败: " + msgOf(e)); }
       return true;
+    case "maxlen": {
+      // 长度上限（与上下文解耦，0=不限制）：无参显示当前值；output|input <tokens> 设置。
+      // 走 config.set 同一链路（自动持久化 + 热更新），成功后同步本地缓存与状态栏。
+      const parts = arg ? arg.trim().split(/\s+/) : [];
+      if (!parts.length) {
+        let v = state.cfgValues || {};
+        // 缓存未加载（设置面板从未打开）时补拉一次 config.get
+        if (v["model.max_output_tokens"] === undefined && v["model.max_input_tokens"] === undefined) {
+          try {
+            const r = await req("config.get", {});
+            v = (r && r.values) || {};
+            state.cfgValues = v;
+          } catch (_) {}
+        }
+        const out = Number(v["model.max_output_tokens"]) || 0;
+        const inp = Number(v["model.max_input_tokens"]) || 0;
+        appendSystem(`当前长度上限: 输出 ${fmtLimitTokens(out)} / 输入 ${fmtLimitTokens(inp)}（0=不限制）`);
+        return true;
+      }
+      if (parts.length !== 2 || (parts[0] !== "output" && parts[0] !== "input")) {
+        toast("用法: /maxlen output|input <tokens>（0=不限制）", "warn");
+        return true;
+      }
+      if (!/^\d+$/.test(parts[1])) {
+        toast("tokens 必须是非负整数（0=不限制）", "warn");
+        return true;
+      }
+      const n = parseInt(parts[1], 10);
+      const isOut = parts[0] === "output";
+      const key = isOut ? "model.max_output_tokens" : "model.max_input_tokens";
+      const label = isOut ? "输出" : "输入";
+      try {
+        await req("config.set", { [key]: n });
+        // 本地缓存 + 设置面板字段同步（面板 diff 以 state.cfgValues 为基准，避免旧值回写）
+        if (state.cfgValues) state.cfgValues[key] = n;
+        const cfgForm = $("#cfgYamlForm");
+        const cfgEl = cfgForm ? cfgForm.querySelector(`[data-cfgkey="${key}"]`) : null;
+        if (cfgEl) { cfgEl.value = String(n); cfgEl.dataset.dirty = ""; updateCfgSaveState(); }
+        if (n === 0) appendSystem(`${label}上限已设为 0（不限制，自动取最大上下文）`);
+        else if (n >= 1000) appendSystem(`${label}上限已设为 ${n}（${fmtLimitTokens(n)}）`);
+        else appendSystem(`${label}上限已设为 ${n}`);
+        refreshModelInfo();
+      } catch (e) { toast("设置失败: " + msgOf(e), "err"); }
+      return true;
+    }
     case "attach":
       $("#attachBtn").click();
       return true;
@@ -3108,7 +3196,7 @@ async function refreshStatus() {
     // 无需依赖 onopen/model.set 等单一触发点）
     if (s.model && (s.model.backend || s.model.effort)) {
       const el = $("#modelInfo");
-      if (el) el.textContent = `${s.model.backend || "deepseek"} · ${s.model.effort || "max"}`;
+      if (el) el.textContent = `${s.model.backend || "deepseek"} · ${s.model.effort || "max"}${modelInfoSuffix(s.model)}`;
     }
     updateModeBadge();
   } catch (_) {}
@@ -3146,6 +3234,42 @@ function fmtTokens(n) {
   return Math.floor(n / 1000) + "k";
 }
 
+// fmtLimitTokens 格式化长度上限（/maxlen 与状态栏"输出xxk"展示用）：
+// 0=不限制显示"不限"；<1000 原值；>=1000 整除显示 Nk，否则 N.Nk（65536→65.5k）。
+// 不复用 fmtTokens：后者 >=10000 为截断语义（与后端 ctx 展示一致），上限需精确 N.Nk。
+function fmtLimitTokens(n) {
+  n = Number(n) || 0;
+  if (n <= 0) return "不限";
+  if (n < 1000) return String(n);
+  return n % 1000 === 0 ? (n / 1000) + "k" : (n / 1000).toFixed(1) + "k";
+}
+
+// 状态栏模型信息后缀：输出上限（>0 时展示）+ 思考关闭提示（effort=off 或
+// thinking_enabled=false 均表示思考被关闭，让用户一眼看出）
+function modelInfoSuffix(m) {
+  let s = "";
+  const mo = Number(m && m.maxOutputTokens) || 0;
+  if (mo > 0) s += ` · 输出${fmtLimitTokens(mo)}`;
+  if (m && (m.effort === "off" || m.thinkingEnabled === false)) s += " · 思考关";
+  s += thinkingSuffix(m && m.thinking);
+  return s;
+}
+
+// thinkingSuffix 多轮思考策略后缀（设计 §3.8）：policy≠off 时返回
+// " · 思考:strict 轮2/3"（验证轮进行中追加 ·验证中）；字段缺失或 policy=off
+// 返回 ""（零回归：旧后端不下发该字段时不渲染）。
+function thinkingSuffix(th) {
+  if (!th || typeof th !== "object") return "";
+  const p = String(th.policy || "");
+  if (!p || p === "off") return "";
+  let s = ` · 思考:${p}`;
+  const r = Number(th.round) || 0, mr = Number(th.maxRound) || 0;
+  if (r > 0 && mr > 0) s += ` 轮${r}/${mr}`;
+  else if (r > 0) s += ` 轮${r}`;
+  if (th.verifying) s += "·验证中";
+  return s;
+}
+
 function setCtxUI(pct, detail) {
   pct = Math.min(99, Math.max(0, Number(pct) || 0));
   const fill = $("#ctxFill"), num = $("#ctxNum");
@@ -3171,7 +3295,7 @@ async function refreshModelInfo() {
   try {
     const m = await req("model.info");
     const el = $("#modelInfo");
-    if (el) el.textContent = `${m.backend} · ${m.effort}`;
+    if (el) el.textContent = `${m.backend} · ${m.effort}${modelInfoSuffix(m)}`;
   } catch (_) {}
 }
 
@@ -5025,8 +5149,10 @@ function renderCfgField(f) {
     ctl = `<label class="cfg-switch" title="${esc(f.desc || "")}">
       <input type="checkbox" data-cfgkey="${f.key}" ${val ? "checked" : ""}><span class="cfg-switch-slider"></span></label>`;
   } else if (f.type === "select") {
+    // 枚举首项为空字符串（model.thinking_length：""=继承 CLI 默认）：仅显示
+    // 文案"（继承默认）"，value 仍为空串——提交值语义不变。
     ctl = `<select data-cfgkey="${f.key}" title="${esc(f.desc || "")}">
-      ${(f.enums || []).map(e => `<option value="${esc(e)}"${String(e) === String(val) ? " selected" : ""}>${esc(e)}</option>`).join("")}</select>`;
+      ${(f.enums || []).map(e => `<option value="${esc(e)}"${String(e) === String(val) ? " selected" : ""}>${e === "" ? "（继承默认）" : esc(e)}</option>`).join("")}</select>`;
   } else if (f.type === "password") {
     ctl = `<input type="password" data-cfgkey="${f.key}" spellcheck="false" autocomplete="off"
       placeholder="${val ? "已设置 " + esc(String(val)) + "（留空不修改）" : "未设置"}" title="${esc(f.desc || "")}">`;

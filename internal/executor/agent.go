@@ -14,6 +14,7 @@ import (
 	"github.com/contextloom/contextloom-agent/internal/ctxmgr"
 	"github.com/contextloom/contextloom-agent/internal/harness"
 	"github.com/contextloom/contextloom-agent/internal/model"
+	"github.com/contextloom/contextloom-agent/internal/thinkmgr"
 	"github.com/contextloom/contextloom-agent/internal/tools"
 	"github.com/contextloom/contextloom-agent/pkg/types"
 )
@@ -58,6 +59,19 @@ type Agent struct {
 	visionModel string
 	// evictSeq 被压缩原文入索引的 ID 计数器（保证索引块 ID 唯一）
 	evictSeq int64
+	// evictPending 锁外收集的压缩原文（压缩回调与推流共用一把 ch，回调里
+	// 直接调用 harness.Engine.Index 会持全局锁做全量倒排重建+语义缓存失效，
+	// 大索引下耗时可达秒级——而回调发生在流式推送循环内，阻塞期间所有
+	// agent.stream 停发、GUI 状态栏/点击全部无响应（"自动压缩时对话中断"
+	// 真实根因）。改为回调只收集（O(1)），每轮结束 flushEvictPending 批量
+	// 入索引，收集区本身有界（每轮压缩产生的条数级），不会长期增长。
+	// batch 去重（batchSeen）：同一轮内同一原文只入索引一次——ctxmgr 的
+	// evictOnce 按次调用防重复，但 AddToHistory/多路径压缩会让同一原文
+	// 在多轮反复触发回调（原文在事件日志完整保留，但只要它仍在对话上下文
+	// 中被截断就会再次回调），重复入索引会膨胀 .contextloom/harness/index.json。
+	evictPending []types.ContextBlock
+	// batchSeen 当前轮已收集原文指纹集合（随收集/清空同步维护）
+	batchSeen map[string]bool
 	// sessionID 归属会话（由 Runtime 注入，主/子 Agent 通用）。
 	// 用于检索与会话私有压缩原文隔离：非空时 Search 只返回
 	// "项目级共享块 + 本会话私有块"，indexCompressedEvicted 写入块带本会话。
@@ -71,6 +85,32 @@ type Agent struct {
 	// 前调用 (round, msgs, true, result)。由 runtime 注入 checkpoint.Store 的落盘实现，
 	// 对标 LangGraph checkpointer：异常重启/goal 续跑可从最新快照恢复消息上下文。
 	checkpointSink func(round int, messages []types.Message, done bool, result string)
+	// ── 多轮思考策略（M3/M4/M5/M6/M8；think==nil 时全部新路径短路，零回归）──
+	// think 思考轮追踪器（nil=策略关闭，零开销；由 runtime 经 SetThinkPolicy 注入）。
+	think *thinkmgr.Tracker
+	// roundEffort 轮次类型钩子（M7）：每轮登记后按 kind 下发一次性 effort 覆盖（nil=不调用）。
+	roundEffort func(kind string)
+	// lastNudgeRound 最近一次软续思注入的轮次（NudgeGap 频控；0=从未注入）。
+	lastNudgeRound int
+	// planOutlined/planOutline 计划门状态（M8）：复杂任务首轮是否已注入执行计划提示及注入文本。
+	planOutlined bool
+	planOutline  string
+	// verifierDone 是否已送审（M9：一次上限，防重复送审）。
+	verifierDone bool
+	// stallCount 连续无新证据停滞计数（M12 止损：ShouldStopNudging 判定输入）。
+	stallCount int
+	// thinkStalled 止损已触发（M12）：thinkGate 跳过软注入（strict 硬拦截不受影响）。
+	thinkStalled bool
+	// lastThinkSig 上一轮证据信号（M12 止损检测输入；随轮次滚动）。
+	lastThinkSig thinkmgr.ThinkSignals
+	// sawWriteEvidence/sawTestEvidence 产出证据痕迹（M9 送审条件输入；
+	// 在工具执行路径按工具名置位：write_file/replace_in_file、run_tests）。
+	sawWriteEvidence bool
+	sawTestEvidence  bool
+	// verifierHook 复核执行钩子（M9；nil=跳过送审，零回归）。
+	verifierHook func(req *VerifierRequest) (string, error)
+	// lastBody 最近一轮正文（M9 复核目标摘要输入；settleThinkRound 刷新）。
+	lastBody string
 }
 
 // SetCheckpointSink 注入每轮检查点回调（nil 安全；nil 时主循环零开销）。
@@ -122,6 +162,230 @@ type Tracer interface {
 // SetTracer 注入 trace 记录器（nil 安全）。
 func (a *Agent) SetTracer(t Tracer) {
 	a.tracer = t
+}
+
+// ── 多轮思考策略（M3/M4/M5/M6/M8；think==nil 时全部短路，与现状逐字一致）──
+
+// SetThinkPolicy 注入思考轮追踪器（nil=关闭策略；nil 安全，策略关闭时零开销）。
+func (a *Agent) SetThinkPolicy(t *thinkmgr.Tracker) {
+	a.think = t
+}
+
+// SetRoundEffortHook 注入轮次类型钩子（M7）：每轮 BeginRound 后调用 kind
+// （explore/execute/verify/refine），由 runtime 下发一次性 effort 覆盖。
+func (a *Agent) SetRoundEffortHook(fn func(kind string)) {
+	a.roundEffort = fn
+}
+
+// SetVerifierHook 注入复核执行钩子（M9；nil=跳过送审——零回归）。
+// 钩子由 runtime 装配（复核子任务经 rt.SpawnTask 复用既有通道）。
+func (a *Agent) SetVerifierHook(fn func(req *VerifierRequest) (string, error)) {
+	a.verifierHook = fn
+}
+
+// noteToolEvidence 记录产出证据痕迹（M9 送审条件输入）：write_file/replace_in_file
+// → 文件写入证据；run_tests → 测试运行证据。按工具名置位，非相关工具零开销。
+func (a *Agent) noteToolEvidence(calls []types.ToolCall) {
+	for _, c := range calls {
+		switch c.Function.Name {
+		case "write_file", "replace_in_file":
+			a.sawWriteEvidence = true
+		case "run_tests":
+			a.sawTestEvidence = true
+		}
+	}
+}
+
+// thinkRoundTracer 可选 Tracer 扩展（M11）：实现方额外获得 think_round 轮次事件；
+// 未实现时静默跳过（零回归）。与 trace.Recorder.TraceThinkRound 签名一致——
+// detail 为 thinkmgr.ThinkRound 的 JSON（trace 包不依赖 thinkmgr，避免依赖倒置）。
+type thinkRoundTracer interface {
+	TraceThinkRound(mode string, round int, detail string)
+}
+
+// thinkGate 收尾点注入判定（RunStream 收尾点 / Run 同步路径共用）。
+// 返回 (追加后的 messages, 是否续轮)；策略关闭/简单任务/逃生通道 → (原样, false)。
+func (a *Agent) thinkGate(messages []types.Message, body string, round int, forcedFinal bool) ([]types.Message, bool) {
+	if a.think == nil {
+		return messages, false // 策略关闭：与现状逐字一致
+	}
+	// 逃生通道（任一即放行，零注入）：token 红线（forcedFinal）绝对优先 /
+	// goal 模式硬排除（goal 已有打磨轮）/ 简单任务零注入（M12 条件路由）。
+	if forcedFinal || a.Task.Mode == "goal" || a.think.Policy().Complexity != thinkmgr.ComplexityComplex {
+		return messages, false
+	}
+	// ① strict 硬拦截（M3/M5）：最少轮数/验证轮未达 → 注入 CoVe 验证指令
+	if hit, reason := a.think.ShouldInterceptFinal(forcedFinal); hit {
+		a.think.Inject(thinkmgr.KindVerify, reason)
+		return append(messages, types.Message{Role: "user", Content: thinkmgr.BuildVerifyNudge(round+1, "")}), true
+	}
+	// ② 软注入（M4/M6）：nudge / verify_pass 命中 → 续思或验证指令。
+	// M12 止损：连续无新证据（thinkStalled）时跳过软注入——止损只停催轮，
+	// 不停拦截（strict 硬拦截见 ①，不受影响）。
+	if !a.thinkStalled {
+		if hit, reason := a.think.ShouldNudge(round, len([]rune(body)), a.lastNudgeRound); hit {
+			content := thinkmgr.BuildVerifyNudge(round+1, "")
+			if a.think.Policy().VerifyPass == "off" {
+				tpls := thinkmgr.ContinueTemplates
+				content = tpls[a.think.Snapshot().Nudges%len(tpls)]
+			}
+			a.think.InjectNudge(reason)
+			a.lastNudgeRound = round
+			return append(messages, types.Message{Role: "user", Content: content}), true
+		}
+	}
+	return messages, false
+}
+
+// settleThinkRound 轮末结算（think==nil 时空操作）：回填工具数/正文长度、
+// 解析验证标记（SettleRound），采集止损信号（M12），并上报 think_round 事件
+// （M11，可选 Tracer 扩展）。digest 为本轮工具结果摘要（无工具传 ""）。
+func (a *Agent) settleThinkRound(toolN int, body string, digest string) {
+	if a.think == nil {
+		return
+	}
+	a.lastBody = body
+	a.think.FinishRound(toolN, len([]rune(body)))
+	a.think.SettleRound(body)
+	a.noteThinkSignals(toolN, digest, body)
+	a.traceThinkRound()
+}
+
+// noteThinkSignals 采集本轮证据信号并更新止损状态（M12 边际收益检测）：
+// 连续 StallRounds 轮无新证据（无工具调用、结果摘要与正文均无变化）→ thinkStalled，
+// thinkGate 软注入分支跳过；有工具调用或正文变化时计数清零（ShouldStopNudging 内置）。
+func (a *Agent) noteThinkSignals(toolN int, digest, body string) {
+	cur := thinkmgr.ThinkSignals{ToolCalls: toolN, ResultDigest: digest, BodyRunes: len([]rune(body))}
+	stallRounds := a.think.Policy().StallRounds
+	if stallRounds <= 0 {
+		stallRounds = 2 // 零值兜底（BuildPolicy 常量口径）
+	}
+	stalled, sc := thinkmgr.ShouldStopNudging(a.lastThinkSig, cur, a.stallCount, stallRounds)
+	a.lastThinkSig = cur
+	a.stallCount = sc
+	a.thinkStalled = stalled
+}
+
+// toolResultsDigest 工具结果摘要（各结果前 200 字符确定性拼接；M12 证据信号输入）。
+// 空结果返回 ""（与"无工具"一致）。
+func toolResultsDigest(results []string) string {
+	if len(results) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range results {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		if rr := []rune(r); len(rr) > 200 {
+			r = string(rr[:200])
+		}
+		b.WriteString(r)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// maybeVerifierHandoff 验证子代理送审判定（M9，v1 常量口径）：返回 nil=不触发。
+// 触发条件：policy=strict 且 complex 且验证轮已过（Verified）且有文件写入/run_tests
+// 证据且非 goal 且未送审过；触发后置 verifierDone（一次上限）。
+// 零回归：条件不满足恒返 nil，不创建任何子任务。
+func (a *Agent) maybeVerifierHandoff(round int) *VerifierRequest {
+	if a.think == nil || a.verifierDone {
+		return nil
+	}
+	p := a.think.Policy()
+	if p.Mode != "strict" || p.Complexity != thinkmgr.ComplexityComplex {
+		return nil // 仅 strict+complex（auto 不送审，防成本失控）
+	}
+	if a.Task.Mode == "goal" {
+		return nil // goal 硬排除（goal 已有打磨轮/门禁，不叠加）
+	}
+	if strings.HasPrefix(strings.TrimSpace(a.Task.Task), VerifierTaskPrefix) {
+		return nil // 防递归：复核任务自身不再送审
+	}
+	if !a.think.Snapshot().Verified {
+		return nil // 验证轮未过：不送审
+	}
+	if !a.sawWriteEvidence && !a.sawTestEvidence {
+		return nil // 无产出证据（文件写入/测试运行）：无物可审
+	}
+	a.verifierDone = true
+	target := strings.TrimSpace(a.lastBody)
+	if r := []rune(target); len(r) > 2000 {
+		target = string(r[:2000]) + "…（截断）"
+	}
+	ev := make([]string, 0, 2)
+	if a.sawWriteEvidence {
+		ev = append(ev, "文件写入证据")
+	}
+	if a.sawTestEvidence {
+		ev = append(ev, "测试运行证据")
+	}
+	target += fmt.Sprintf("\n（产出证据：%s；收尾轮次：%d）", strings.Join(ev, "、"), round)
+	return &VerifierRequest{Kind: VerifierKind, Target: target}
+}
+
+// tryVerifierReview 收尾前送审（M9）：hook nil/条件不满足/中断收尾 → (原样, false)
+// （零回归）；命中则执行复核并把结果以 VerifierResultPrefix 追加到消息，
+// 返回 (新消息, true) 再走一轮（复核输出回注主线程可见）。
+func (a *Agent) tryVerifierReview(messages []types.Message, round int, forcedFinal bool) ([]types.Message, bool) {
+	if a.verifierHook == nil || forcedFinal {
+		return messages, false // 零回归 / 中断收尾不送审（条件：未中断）
+	}
+	req := a.maybeVerifierHandoff(round)
+	if req == nil {
+		return messages, false
+	}
+	out, err := a.verifierHook(req)
+	if err != nil {
+		out = "复核未完成（执行失败）：" + err.Error() + "；请基于已有证据直接给出最终结论。"
+	}
+	messages = append(messages, types.Message{Role: "user", Content: VerifierResultPrefix + "\n" + out})
+	return messages, true
+}
+
+// traceThinkRound 上报最近一轮 think_round 事件（可选接口；未实现/序列化失败静默跳过）。
+func (a *Agent) traceThinkRound() {
+	if a.think == nil {
+		return
+	}
+	tt, ok := a.tracer.(thinkRoundTracer)
+	if !ok {
+		return
+	}
+	s := a.think.Snapshot()
+	if len(s.Rounds) == 0 {
+		return
+	}
+	r := s.Rounds[len(s.Rounds)-1]
+	if b, err := json.Marshal(r); err == nil {
+		tt.TraceThinkRound(a.Task.Mode, r.Round, string(b))
+	}
+}
+
+// planOutlineText 计划门注入文本（M8，soft）：复杂任务首轮引导先列可验证计划。
+const planOutlineText = "【执行计划】先列出可验证的执行计划再动手：1. …（步骤与预期产出）2. …（如适用）；随后按计划执行，完成后自查结论再收尾。【计划完】"
+
+// planGateInject 计划门注入（M8，soft）：复杂任务首轮注入 1 条执行计划提示（仅一次）。
+// think==nil / goal / 非 complex / 已注入 / round!=1 → 原样返回（零回归）。
+func (a *Agent) planGateInject(messages []types.Message, round int) []types.Message {
+	if a.think == nil || a.Task.Mode == "goal" || a.planOutlined || round != 1 {
+		return messages
+	}
+	if a.think.Policy().Complexity != thinkmgr.ComplexityComplex {
+		return messages
+	}
+	a.planOutlined = true
+	a.planOutline = planOutlineText
+	return append(messages, types.Message{Role: "user", Content: planOutlineText})
+}
+
+// planGateFilterTools 计划门工具过滤（M8 v1 soft）：恒等返回——"未列计划前禁用
+// 写类工具"的硬门列入后续版本；此处保留挂钩点（v1 零行为变化）。
+func planGateFilterTools(tools []types.ToolDefinition, mode string, planned bool) []types.ToolDefinition {
+	return tools
 }
 
 func (a *Agent) SetBackend(b model.Backend) {
@@ -191,7 +455,13 @@ func (a *Agent) knowledgeIndex() map[string]any {
 // 知识索引以 JSON 块追加，仅占极少 token（目录路径 + 规范一句话），
 // 详细内容按需经工具读取。
 func (a *Agent) chatSystemPrompt() string {
-	base := "你是ContextLoom中文编码助手。可用工具:read_file,exec_command,search_content,run_tests,write_file,list_files,git_diff,web_fetch,replace_in_file。需要实时数据时调用工具。中文回答，简洁。任务完成后直接给出最终答案并停止，不要反复调用工具。"
+	// 多轮思考策略实际生效（complex 任务）时收尾指令条件化（M8/H6）；
+	// 策略关闭/简单任务（M12 条件路由：零影响）时逐字保留原文（零回归）。
+	closing := "任务完成后直接给出最终答案并停止，不要反复调用工具。"
+	if a.think != nil && a.think.Policy().Complexity == thinkmgr.ComplexityComplex {
+		closing = "简单问题直接回答；复杂问题先列计划、执行后自查再收尾。"
+	}
+	base := "你是ContextLoom中文编码助手。可用工具:read_file,exec_command,search_content,run_tests,write_file,list_files,git_diff,web_fetch,replace_in_file。需要实时数据时调用工具。中文回答，简洁。" + closing
 	if a.persistencePaths == nil {
 		return base
 	}
@@ -384,17 +654,27 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		round++
 		a.runRound = round
+		// 多轮思考策略（think!=nil）：轮首登记 + 轮次类型钩子（M7）+ 计划门注入（M8）。
+		if a.think != nil {
+			kind := a.think.BeginRound()
+			if a.roundEffort != nil && kind != "" {
+				a.roundEffort(string(kind))
+			}
+			messages = a.planGateInject(messages, round)
+		}
 		// token 预算兜底：上下文接近上限时【先按预算压缩】释放空间，压缩后仍超红线才强制收尾。
 		// 关键：不能拿"未压缩的 token 数"直接判红线——deepseek.go 发送前兜底本就会压缩，
 		// 未压缩超限时压缩后通常空间充足，直接强制收尾会"莫名其妙中止任务"。
 		// 压缩后仍超红线才是真正会 API 400 的硬约束，此时才提示总结（措辞温和，允许说明剩余步骤）。
+		// 压缩去重：压缩生效即复核 token，未仍超线则不再叠加收尾注入（与流式路径同语义）。
 		if ds, ok := a.backend.(*model.DeepSeekBackend); ok && ds.MaxContext() > 0 {
 			b := ctxmgr.NewTokenBudget(ds.MaxContext())
 			if b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
-				if compacted, changed := ctxmgr.CompactToBudgetWithEvict(messages, b, a.indexCompressedEvicted); changed && compacted != nil {
+				compacted, changed := ctxmgr.CompactToBudgetWithEvict(messages, b, a.indexCompressedEvicted)
+				if changed && compacted != nil {
 					messages = compacted
 				}
-				if b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
+				if !changed || b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
 					messages = append(messages, types.Message{
 						Role:    "user",
 						Content: "【上下文提示】上下文空间接近上限，请停止调用新工具，直接总结当前进展与结论；未完成部分请说明剩余步骤。",
@@ -414,6 +694,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 
 		if len(toolCalls) == 0 {
+			// 多轮思考策略（think!=nil）：轮末结算后过策略门（M3-M6）；
+			// 策略关闭/简单任务/逃生通道 → 原样 break，与现状逐字一致（budgetExceeded 传 false）。
+			a.settleThinkRound(0, response, "")
+			if msgs, cont := a.thinkGate(messages, response, round, false); cont {
+				messages = msgs
+				continue
+			}
+			// M9 验证子代理：收尾放行前送审一次（hook nil/条件不满足 → 零回归跳过）。
+			if msgs, cont := a.tryVerifierReview(messages, round, false); cont {
+				messages = msgs
+				continue
+			}
 			a.Task.Payload = map[string]string{"result": response}
 			break
 		}
@@ -437,12 +729,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		// 正确格式：assistant 消息包含 tool_calls（ID 规范化：文本兜底解析的
 		// text-* 标记 ID 非法/重复，会导致下一轮 API 400 → 对话中止）
 		toolCalls = normalizeToolCallIDs(toolCalls)
+		// M9 产出证据痕迹（write_file/replace_in_file/run_tests → 送审条件输入）
+		a.noteToolEvidence(toolCalls)
 		messages = append(messages, types.Message{
 			Role:      "assistant",
 			Content:   response,
 			ToolCalls: toolCalls,
 		})
 
+		toolResultList := make([]string, 0, len(toolCalls))
 		for _, call := range toolCalls {
 			tStart := time.Now()
 			result, toolErr := a.tools.Execute(a.toolCtx(ctx), call)
@@ -460,6 +755,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				resultStr = formatToolResult(result)
 			}
 			resultStr = maybeOffloadToFile(resultStr, call.Function.Name)
+			toolResultList = append(toolResultList, resultStr)
 			// 工具结果完整进入消息，不做截断（模型需要看到完整输出；
 			// 超限保护由发送前的 ctxmgr token 预算兜底）
 			messages = append(messages, types.Message{
@@ -471,8 +767,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		// 多批次续派：一批 spawn_task 完成后动态提示评估并决定是否派发新一批
 		messages = a.batchNudge(toolCalls, messages)
 
+		// 多轮思考策略（think!=nil）：工具轮轮末结算（工具数/正文长度/验证标记/止损信号 + think_round 事件）。
+		a.settleThinkRound(len(toolCalls), response, toolResultsDigest(toolResultList))
+
 		// 每轮检查点：本轮消息更新完成后的状态快照
 		a.sinkCheckpoint(round, messages, false, "")
+		// 每轮末尾批量入索引压缩原文（回调只收集不阻塞推流，见 indexCompressedEvicted）
+		a.flushEvictPending()
 	}
 
 	for i := range contextBlocks {
@@ -611,6 +912,10 @@ func (a *Agent) buildMessages(task types.TaskCreate, context []types.ContextBloc
 			"persistence": a.persistencePaths,
 			// 知识索引：插件/技能目录与各自规范（轻量索引，详情按需用工具读，不全量内联）
 			"knowledge": a.knowledgeIndex(),
+		}
+		// 多轮思考策略实际生效（complex 任务）时追加计划门条款（M8）；简单任务/关闭时策略文本逐字保留原文。
+		if a.think != nil && a.think.Policy().Complexity == thinkmgr.ComplexityComplex {
+			sysPrompt["strategy"] = sysPrompt["strategy"].(string) + "计划门（多轮思考策略开启）：复杂任务先输出【执行计划】（可验证步骤清单），执行后对照计划自查再收尾。"
 		}
 		ctxBlocks := contextBlocksForInject(context)
 		if len(ctxBlocks) > 0 {
@@ -909,14 +1214,24 @@ func (a *Agent) compactHistoryForTask() []types.Message {
 // 使 AI 之后可通过 harness_search 找回被截断/丢弃的内容（压缩≠永久丢失）。
 // 带 role 与 [压缩原文] 标记便于识别来源；ID 用时间戳+计数器保证唯一。
 // 块带归属会话（a.sessionID）：仅该会话可检索到，防止跨会话串扰。
+//
+// ⚠️ 性能关键路径：本回调在流式推送循环/推流 goroutine 内被 ctxmgr 调用，
+// 旧实现直接 harness.Index（持全局锁全量倒排重建+语义/embedding 缓存失效，
+// 大索引下单次可达秒级）——阻塞期间 agent.stream 停发、GUI 状态栏/点击
+// 全部无响应，表现为"上下文达到阈值自动压缩时对话中断"。现在只做
+// O(1) 收集（同轮去重），真正入索引延迟到每轮末尾的 flushEvictPending。
 func (a *Agent) indexCompressedEvicted(m types.Message) {
-	if a.harness == nil {
-		return
-	}
 	s, ok := m.Content.(string)
-	if !ok || s == "" || strings.HasPrefix(s, "[历史摘要]") {
+	if !ok || s == "" || strings.HasPrefix(s, "[历史摘要]") || strings.HasPrefix(s, "[压缩原文") {
 		return
 	}
+	if a.batchSeen == nil {
+		a.batchSeen = make(map[string]bool)
+	}
+	if a.batchSeen[s] {
+		return
+	}
+	a.batchSeen[s] = true
 	a.evictSeq++
 	block := types.ContextBlock{
 		ID:        fmt.Sprintf("compressed:%d:%d", time.Now().UnixNano(), a.evictSeq),
@@ -925,7 +1240,24 @@ func (a *Agent) indexCompressedEvicted(m types.Message) {
 		LastUsed:  time.Now(),
 		SessionID: a.sessionID,
 	}
-	a.harness.Index(context.Background(), []types.ContextBlock{block})
+	a.evictPending = append(a.evictPending, block)
+}
+
+// flushEvictPending 把收集的压缩原文批量写入 Harness 检索索引（每轮末尾
+// 调用一次；空收集零开销）。批量单次 Index 只触发一轮缓存失效/倒排重建，
+// 替代旧实现逐条回调逐次全量重建的 O(回调数×索引规模) 开销。
+func (a *Agent) flushEvictPending() {
+	if len(a.evictPending) == 0 || a.harness == nil {
+		a.evictPending = nil
+		if a.batchSeen != nil {
+			a.batchSeen = make(map[string]bool)
+		}
+		return
+	}
+	blocks := a.evictPending
+	a.evictPending = nil
+	a.batchSeen = make(map[string]bool)
+	a.harness.Index(context.Background(), blocks)
 }
 
 // searchMeta 返回本 Agent 的检索过滤元数据。
@@ -1010,7 +1342,7 @@ func (a *Agent) RunStream(ctx context.Context) (<-chan string, <-chan error, err
 	query := buildQuery(a.Task)
 	contextBlocks := a.harness.Search(ctx, query, a.searchMeta())
 	messages := a.buildMessages(a.Task, contextBlocks)
-	toolList := a.tools.ToolDefinitions()
+	toolList := planGateFilterTools(a.tools.ToolDefinitions(), a.Task.Mode, a.planOutlined) // M8 v1 soft：恒等返回（硬门挂钩点）
 
 	ch := make(chan string, 256)
 	errCh := make(chan error, 1)
@@ -1060,17 +1392,31 @@ func (a *Agent) RunStream(ctx context.Context) (<-chan string, <-chan error, err
 		for {
 			round++
 			a.runRound = round
+			// 多轮思考策略（think!=nil）：轮首登记 + 轮次类型钩子（M7）+ 计划门注入（M8）。
+			if a.think != nil {
+				kind := a.think.BeginRound()
+				if a.roundEffort != nil && kind != "" {
+					a.roundEffort(string(kind))
+				}
+				messages = a.planGateInject(messages, round)
+			}
 			// token 预算兜底：先按预算压缩释放空间（压缩后通常可继续执行），
 			// 仅当压缩后仍超安全红线才强制收尾——避免"未压缩 token 超限"误判导致莫名其妙中止。
+			// 压缩去重：压缩生效的轮次不再叠加"仍超红线"的收尾注入——压缩把
+			// 巨型旧消息截断到下限后红线判定多为达标，此时旧代码仍会追加
+			// 【上下文提示】+ 看门狗式 user 消息，token 回弹、上下文重复，
+			// 多任务并行时各会话叠加放大（"压缩后对话中断/内容变少"观感）。
+			// 这里压缩后先复核一次 token：确实仍超红线才走 forcedFinal。
 			if !forcedFinal {
 				if ds, ok := a.backend.(*model.DeepSeekBackend); ok && ds.MaxContext() > 0 {
 					b := ctxmgr.NewTokenBudget(ds.MaxContext())
 					if b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
-						if compacted, changed := ctxmgr.CompactToBudgetWithEvict(messages, b, a.indexCompressedEvicted); changed && compacted != nil {
+						compacted, changed := ctxmgr.CompactToBudgetWithEvict(messages, b, a.indexCompressedEvicted)
+						if changed && compacted != nil {
 							messages = compacted
 							ch <- "🧹 上下文接近上限，已自动压缩旧消息释放空间，继续执行\n"
 						}
-						if b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
+						if !changed || b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
 							forcedFinal = true
 							ch <- "⚠ 上下文空间已满（压缩后仍超红线，唯一硬约束）：请收尾当前步骤并总结进展\n"
 							messages = append(messages, types.Message{
@@ -1313,6 +1659,17 @@ func (a *Agent) RunStream(ctx context.Context) (<-chan string, <-chan error, err
 				}
 				// 模型已给出实质回答且未调用工具 → 任务结束，直接收尾。
 				// 不再注入"任务尚未完成，请继续"催促（它会诱导模型反复调工具，是死循环源头之一）。
+				// 多轮思考策略（think!=nil）：轮末结算后过策略门（M3-M6）——strict 拦截/软续思命中则注入并续轮。
+				a.settleThinkRound(0, body, "")
+				if msgs, cont := a.thinkGate(messages, body, round, forcedFinal); cont {
+					messages = msgs
+					continue
+				}
+				// M9 验证子代理：收尾放行前送审一次（hook nil/条件不满足/中断 → 零回归跳过）。
+				if msgs, cont := a.tryVerifierReview(messages, round, forcedFinal); cont {
+					messages = msgs
+					continue
+				}
 				break
 			}
 
@@ -1326,6 +1683,8 @@ func (a *Agent) RunStream(ctx context.Context) (<-chan string, <-chan error, err
 			// 这里统一重生成合法唯一 ID（API 结构化返回的合法 ID 保留）。
 			toolCalls = normalizeToolCallIDs(toolCalls)
 			messages[len(messages)-1].ToolCalls = toolCalls
+			// M9 产出证据痕迹（write_file/replace_in_file/run_tests → 送审条件输入）
+			a.noteToolEvidence(toolCalls)
 
 			// 循环检测
 			for _, call := range toolCalls {
@@ -1362,8 +1721,13 @@ func (a *Agent) RunStream(ctx context.Context) (<-chan string, <-chan error, err
 			}
 			messages = sanitizeMessages(messages)
 
+			// 多轮思考策略（think!=nil）：工具轮轮末结算（工具数/正文长度/验证标记/止损信号 + think_round 事件）。
+			a.settleThinkRound(len(toolCalls), body, toolResultsDigest(toolResults))
+
 			// 每轮检查点：本轮消息更新完成后的状态快照
 			a.sinkCheckpoint(round, messages, false, "")
+			// 每轮末尾批量入索引压缩原文（回调只收集不阻塞推流，见 indexCompressedEvicted）
+			a.flushEvictPending()
 		}
 
 		for i := range contextBlocks {
@@ -1868,15 +2232,18 @@ func (a *Agent) RunStreamWithBudget(ctx context.Context, maxIter int) (<-chan st
 
 			// token 预算兜底：先按预算压缩释放空间（压缩后通常可继续执行），
 			// 仅当压缩后仍超安全红线才强制收尾——避免"未压缩 token 超限"误判导致莫名其妙中止。
+			// 压缩去重（与主 RunStream 路径同语义）：压缩生效的轮次不再叠加
+			// 收尾注入，仅压缩后复核仍超红线才 forcedFinal。
 			if !forcedFinal {
 				if ds, ok := a.backend.(*model.DeepSeekBackend); ok && ds.MaxContext() > 0 {
 					b := ctxmgr.NewTokenBudget(ds.MaxContext())
 					if b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
-						if compacted, changed := ctxmgr.CompactToBudgetWithEvict(messages, b, a.indexCompressedEvicted); changed && compacted != nil {
+						compacted, changed := ctxmgr.CompactToBudgetWithEvict(messages, b, a.indexCompressedEvicted)
+						if changed && compacted != nil {
 							messages = compacted
 							ch <- "🧹 上下文接近上限，已自动压缩旧消息释放空间，继续执行\n"
 						}
-						if b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
+						if !changed || b.SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
 							forcedFinal = true
 							ch <- "⚠ 上下文空间已满（压缩后仍超红线，唯一硬约束）：请收尾当前步骤并总结进展\n"
 							messages = append(messages, types.Message{
@@ -2061,6 +2428,8 @@ func (a *Agent) RunStreamWithBudget(ctx context.Context, maxIter int) (<-chan st
 			}
 			// 多批次续派：一批 spawn_task 完成后动态提示评估并决定是否派发新一批
 			messages = a.batchNudge(toolCalls, messages)
+			// 每轮末尾批量入索引压缩原文（回调只收集不阻塞推流，见 indexCompressedEvicted）
+			a.flushEvictPending()
 			lastToolCalls = toolCalls
 			lastToolResults = toolResults
 			_ = lastToolCalls

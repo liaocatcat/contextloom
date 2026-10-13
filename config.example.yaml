@@ -29,6 +29,16 @@ models:
     supports_vision: false
     # 是否向 API 发送 reasoning_effort（思考强度）参数。默认 true（打开）。
     send_effort: true
+    # 单次模型输出 token 上限（0=不限制，自动取最大上下文；与 max_context 解耦）。
+    # 思考过程（reasoning）计入该预算；例如 1M 窗口可设 65536 给输入留足空间。
+    max_output_tokens: 0
+    # 单次请求输入 token 预算上限（0=不限制，取最大上下文）。
+    max_input_tokens: 0
+    # 思考长度档位（""=继承 cli_defaults.effort）：off 关闭思考；low/medium/high
+    # 低中高；xhigh/max 最高两档。档位越低输出越短、越快。
+    thinking_length: ""
+    # 是否启用模型思考（false=向 API 发送 thinking:{type:disabled}；仅 DeepSeek 官方通道生效）。
+    thinking_enabled: true
   # - name: "gpt-4o"                # 示例：OpenAI 兼容多模态
   #   backend: "openai"
   #   endpoint: "https://api.openai.com/v1"
@@ -154,6 +164,20 @@ context:
   hard_ratio: 0.85      # 达到 85% 丢弃最旧消息（累积滚动摘要）
   safety_ratio: 0.92    # 发送前兜底红线（超限自动压缩/强制收尾）
   keep_recent: 8        # 至少保留的完整消息条数（永不丢弃）
+
+# 多轮思考触发策略（复杂问题杜绝一次思考解决：收尾拦截/验证轮/续思注入/轮次升档）
+# 与"模型"分组的 thinking_length（每轮想多长）正交——本组管"想几轮/是否验证"。
+# 全部零值 = off/现状行为（零回归）；空串归一（""→off/off/none/max）由运行时负责。
+thinking:
+  policy: "off"                 # off=不干预（现状）；auto=复杂任务软触发；strict=强制验证轮并拦截收尾
+  min_think_rounds: 0           # 复杂任务最少思考轮数 0-20（0=不强制；建议 3=首探+执行+验证）
+  max_think_rounds: 3           # 续轮注入总上限 1-20（拦截+nudge；工具执行轮不受限）
+  verify_pass: "off"            # 验证轮：off=无；auto=复杂任务触发；on=收尾必验（含 simple）
+  complexity_threshold: 60      # 复杂度评分阈值 0-100（≥阈值=复杂）
+  nudge_enabled: false          # 续思提示注入开关（结构性催轮）
+  nudge_max: 2                  # nudge 单独上限 0-10
+  round_effort_policy: "none"   # 轮次档位：none=保持（现状）；escalate=验证轮升档
+  round_effort_cap: "max"       # 升档封顶 low/medium/high/xhigh/max（仅 escalate 生效）
 
 cli_defaults:
   model: "local-model"

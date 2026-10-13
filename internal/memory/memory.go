@@ -59,7 +59,14 @@ func (m *System) Load(uuid string) (*types.Session, error) {
 	m.mu.RLock()
 	if session, ok := m.sessions[uuid]; ok {
 		m.mu.RUnlock()
-		return session, nil
+		// 返回浅拷贝：缓存指针绝不能直接交出——GUI 并行流回写链路会
+		// Load→改（persistCompactionSnapshot 写 CompactedMessages/UpdatedAt）
+		// →Save 同一指针对象；若直接返回缓存指针，并行流在【别的会话】上
+		// 做的 Save 会原地改写本会话缓存对象，随后的 LoadSession（会话切换）
+		// 读到被污染的 CompactedMessages（多任务并行下压缩快照跨会话串扰、
+		// 切换后历史错乱/变少的根因之一）。浅拷贝即可：调用方只改顶层字段。
+		cp := *session
+		return &cp, nil
 	}
 	m.mu.RUnlock()
 

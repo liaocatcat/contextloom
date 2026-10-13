@@ -225,11 +225,14 @@ func findContextLoomInDir(dir string) (string, bool) {
 		}
 	}
 	// 带平台后缀的产物：contextloom-<GOOS>-<GOARCH>[.exe]
+	// 同目录并存多平台产物时优先当前平台，其余平台兜底——保证"包里带了 backend 就能拉起"。
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return "", false
 	}
+	plat := runtime.GOOS + "-" + runtime.GOARCH
 	suffixes := []string{"", ".exe"}
+	fallback := ""
 	for _, ent := range ents {
 		if ent.IsDir() {
 			continue
@@ -240,12 +243,18 @@ func findContextLoomInDir(dir string) (string, bool) {
 				continue
 			}
 			base := strings.TrimSuffix(name, ext)
-			if goos, goarch, ok := splitPlatformSuffix(base); ok {
-				_ = goos
-				_ = goarch
-				return filepath.Join(dir, name), true
+			if _, _, ok := splitPlatformSuffix(base); ok {
+				if strings.Contains(base, plat) {
+					return filepath.Join(dir, name), true
+				}
+				if fallback == "" {
+					fallback = filepath.Join(dir, name)
+				}
 			}
 		}
+	}
+	if fallback != "" {
+		return fallback, true
 	}
 	return "", false
 }

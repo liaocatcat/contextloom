@@ -145,3 +145,45 @@ var HandoffToolSchema = map[string]any{
 }
 
 var _ = json.Marshal // 保留 import（schema 序列化备用）
+
+// ─────────────────────────────────────────────────────────────
+// M9 验证子代理（VerifierRequest 复核请求规格）
+//
+// strict+complex 任务收尾前送审一次：主 Agent 把产出交给只读复核子代理，
+// 复核结果以"【复核结果】"回注主线程再走一轮（设计文档 §3.7 复核纪律：
+// 只读评审、不写产出、不改主链上下文；成本以"一次上限"兜底）。
+// ─────────────────────────────────────────────────────────────
+
+// VerifierKind 复核请求类型（VerifierRequest.Kind 固定值）。
+const VerifierKind = "verify"
+
+// VerifierResultPrefix 复核结果回注前缀（结果以本前缀追加到主线程消息）。
+const VerifierResultPrefix = "【复核结果】"
+
+// VerifierTaskPrefix 复核子任务文本前缀（runtime 装配与 executor 防递归共用）：
+// 复核任务自身不再送审（只读复核的复核无边际收益，且防链式递归）。
+const VerifierTaskPrefix = "验证任务（只读复核）"
+
+// BuiltinVerifyChecks 内置复核清单四项（设计文档 §3.7：
+// 证据核对/关键数字复算/边界与失败路径/与计划对照）。
+var BuiltinVerifyChecks = []string{
+	"证据核对：逐条核对产出中的文件/命令/测试结果是否真实存在、可复现",
+	"关键数字复算：复算测试通过数/覆盖率/性能等关键数字，识别虚报",
+	"边界与失败路径：检查边界条件、错误处理与失败路径是否被覆盖",
+	"与计划对照：对照任务目标逐项确认完成度，列出缺口",
+}
+
+// VerifierRequest 复核请求规格（M9；复用既有 handoff/spawn 通道）。
+type VerifierRequest struct {
+	Kind   string   // 固定 "verify"
+	Target string   // 被复核产出（正文摘要/文件清单）
+	Checks []string // 复核清单（空=内置四项 BuiltinVerifyChecks）
+}
+
+// VerifierChecks 返回生效复核清单（空=内置四项；返回副本防调用方篡改）。
+func (r *VerifierRequest) VerifierChecks() []string {
+	if r == nil || len(r.Checks) == 0 {
+		return append([]string(nil), BuiltinVerifyChecks...)
+	}
+	return append([]string(nil), r.Checks...)
+}
