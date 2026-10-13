@@ -33,3 +33,25 @@ type StreamExBackend interface {
 	StreamEx(ctx context.Context, messages []types.Message) (<-chan StreamChunk, <-chan error)
 	SetStreamTools(tools []types.ToolDefinition)
 }
+
+// GenerationParamsBackend 可选接口：支持独立设置输出/输入 token 上限与思考开关。
+//
+// 设计动机（对齐 DeepSeek Harness 的 max_tokens 三级优先级与 thinking 独立字段）：
+// 输出预算（max_tokens）、输入预算（发送前压缩阈值）、思考开关是三个相互独立的
+// 用户参数，不应再被"上下文窗口"一个值笼统代表。但把它并进 Backend 接口本体
+// 会强制所有实现（含大量测试 mock 与 OpenAI 兼容通道）补方法，破坏面过大；
+// 因此沿用 StreamExBackend 的可选接口模式：只有真正支持的后端（DeepSeekBackend、
+// modelgateway.handle）实现它，调用方用类型断言探测，未实现者保持原有行为。
+//
+// 约定语义：
+//   - n<=0 表示"未设置"，回退 maxContext（保持历史行为逐字不变）；
+//   - ThinkingEnabled() 仅在显式设置过 true 时返回 true（nil=不显式发送
+//     thinking 字段，跟随 reasoning_effort 的历史行为）。
+type GenerationParamsBackend interface {
+	SetMaxOutputTokens(n int) // n<=0 表示未设置（回退 maxContext，保持现状语义）
+	MaxOutputTokens() int
+	SetMaxInputTokens(n int) // n<=0 表示未设置（回退 maxContext）
+	MaxInputTokens() int
+	SetThinkingEnabled(on bool)
+	ThinkingEnabled() bool
+}

@@ -1,3 +1,8 @@
+//go:build !windows
+
+// 该测试经 buildSmokeBin 拉起后端二进制（Unix 命名 contextloom，无 .exe 后缀），
+// 辅助函数 buildSmokeBin 位于 smoke_test.go（!windows 标签）；Windows 下整文件排除，
+// 避免 Windows 测试包编译失败（vet: undefined: buildSmokeBin）。
 package main
 
 import (

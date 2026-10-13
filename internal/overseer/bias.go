@@ -31,6 +31,9 @@ const (
 	// BiasUnverifiedPass 自答式测试：正文声称"测试通过"，但本轮没有
 	// run_tests 工具调用证据。
 	BiasUnverifiedPass BiasKind = "unverified_pass"
+	// BiasRushedAnswer 草率回答（M11 度量）：复杂任务总轮数 <2 且既无工具
+	// 证据也无验证证据——"复杂问题一次思考解决"。默认扣 10。
+	BiasRushedAnswer BiasKind = "rushed_answer"
 )
 
 // BiasHit 一条偏差命中记录。
@@ -100,6 +103,25 @@ func BiasAnalyze(response string, ev *ToolEvidence, specReady bool) []BiasHit {
 	}
 
 	return hits
+}
+
+// BiasRushed 草率回答判据（M11 度量，确定性）：
+// complexity=="complex" 且总轮数 <2 且既无工具证据（toolCalls==0）也未送审
+// （!verified）→ 命中一条 rushed_answer（-10）。其余一律不命中：simple 不误伤；
+// 有工具证据或已送审不命中；轮数达标（>=2）不命中。
+// 输入全部来自确定性记录（轮次计数/工具调用/验证事件），模型自报不参与。
+// complexity 取值 "simple"/"complex"（与 thinkmgr.Complexity 字符串值对齐）；
+// 用 string 传参避免 overseer 依赖 thinkmgr（依赖方向：thinkmgr 不 import overseer）。
+func BiasRushed(rounds, toolCalls int, verified bool, complexity string) []BiasHit {
+	if complexity != "complex" || rounds >= 2 || toolCalls > 0 || verified {
+		return nil
+	}
+	return []BiasHit{{
+		Kind:     BiasRushedAnswer,
+		Desc:     "草率回答：复杂任务仅 1 轮（总轮数<2）且无任何工具/验证证据——复杂问题不得一次思考解决，应先探索（补工具证据）或补验证轮再收尾。",
+		Penalty:  10,
+		DefectID: "d-bias-rushed-answer",
+	}}
 }
 
 // stripGoalProtocolMarkers 剥离 goal 协议标记（成对与单标记），

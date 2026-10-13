@@ -65,6 +65,39 @@ func (b *TokenBudget) AuditLog() []string {
 	return out
 }
 
+// Clone 返回预算副本（锁外压缩用）：阈值/上限/KeepRecent 深拷贝，
+// Summary 浅拷贝字符串（不可变）；audit 不拷贝（压缩审计只记主线压缩）。
+// 用途：AddToHistory 锁外压缩路径——压缩耗时期间若配置热更新替换了
+// rt.ctxBudget，锁外仍持有引用的就是旧对象；用副本压缩、回写前把副本
+// Summary 合并回现役预算，可避免"压缩结果写入已被替换的旧预算"的
+// 丢失更新（lost-update），也避免压缩期间修改共享预算的审计/摘要字段。
+func (b *TokenBudget) Clone() *TokenBudget {
+	if b == nil {
+		return nil
+	}
+	cp := *b
+	cp.audit = nil
+	return &cp
+}
+
+// MergeAudit 合并一条来自锁外压缩副本的审计记录（去重后追加）。
+// 锁外压缩（AddToHistory 用 Clone 副本）期间产生的动作审计最终由
+// Runtime.MergeSummaryInto 合并回现役预算，保证 /ctx 审计视图完整。
+func (b *TokenBudget) MergeAudit(line string) {
+	if line == "" {
+		return
+	}
+	for _, a := range b.audit {
+		if a == line {
+			return
+		}
+	}
+	b.audit = append(b.audit, line)
+	if len(b.audit) > 20 {
+		b.audit = b.audit[len(b.audit)-20:]
+	}
+}
+
 // NewTokenBudget 构造预算控制器（默认阈值），maxTokens<=0 表示无预算限制。
 func NewTokenBudget(maxTokens int) *TokenBudget {
 	return &TokenBudget{
@@ -607,7 +640,8 @@ func CompactToBudgetWithEvict(msgs []types.Message, b *TokenBudget, evict EvictF
 				}
 				// 思维链同样超 300 字符时截断（thinking 模型思维链是占用大头，
 				// 只截正文 released≈0 → "高占用却压不动"）。
-				if m.ReasoningContent != "" && len([]rune(m.ReasoningContent)) > 300 {
+				// M10 思考保护：带保护标记的思考跳过二次截断（验证轮的"上一轮思考"是复核关键证据，结论在尾段、截前缀恰好丢结论；正文仍可削）。
+				if m.ReasoningContent != "" && !m.ReasoningProtected && len([]rune(m.ReasoningContent)) > 300 {
 					evictOnce(origIdx[i])
 					m.ReasoningContent = TruncateForBudget(m.ReasoningContent, 300)
 					out = append(out, m)
@@ -653,8 +687,8 @@ func CompactToBudgetWithEvict(msgs []types.Message, b *TokenBudget, evict EvictF
 				}
 				// 思维链参与竞争：thinking 模型占用大头在 ReasoningContent，
 				// 不纳入则折半只动短文正文，released≈0（"高占用却压不动"根因）。
-				// tcIdx=-2 标识"折思维链"。
-				if m.ReasoningContent != "" {
+				// tcIdx=-2 标识"折思维链"。M10 思考保护：带保护标记的思考不参与截断目标竞争（正文仍可削）。
+				if m.ReasoningContent != "" && !m.ReasoningProtected {
 					if l := len([]rune(m.ReasoningContent)); l > size {
 						idx, tcIdx, size = i, -2, l
 					}

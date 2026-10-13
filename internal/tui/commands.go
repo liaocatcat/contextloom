@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -139,12 +140,66 @@ func (cr *CommandRegistry) registerBuiltins() {
 
 	cr.commands["/effort"] = func(args []string) string {
 		if len(args) == 0 {
-			return "当前: " + cr.rt.Config.CLIDefaults.Effort
+			// 无参：展示当前档位 + 三处长度参数生效值（排查"调了没反应"）。
+			am := cr.rt.Config.ActiveModel()
+			out := fmt.Sprintf("当前思考深度: %s | 输出上限: %s | 输入预算: %s",
+				cr.rt.Config.CLIDefaults.Effort, fmtTokens(am.MaxOutputTokens), fmtTokens(am.MaxInputTokens))
+			if am.ThinkingLength != "" {
+				out += " | 预设档位: " + am.ThinkingLength
+			}
+			return out
 		}
-		cr.rt.SetEffort(args[0])
-		return "已设置: " + args[0]
+		level := args[0]
+		switch level {
+		case "off", "low", "medium", "high", "xhigh", "max":
+			cr.rt.SetEffort(level)
+			if level == "off" {
+				return "已设置: off（关闭思考，不发送 reasoning_effort）"
+			}
+			return "已设置: " + level
+		default:
+			return "非法档位: " + level + "（可用: off/low/medium/high/xhigh/max）"
+		}
 	}
-	cr.descs["/effort"] = "设置思考深度 (low/medium/high)"
+	cr.descs["/effort"] = "设置思考深度 (off/low/medium/high/xhigh/max)；无参查看长度参数"
+
+	// /maxlen：输出/输入长度上限（与上下文窗口解耦，对标 dsh 的 max_tokens 三级优先级）。
+	// 走 ApplyConfigPatch 热更新链路（持久化 + 压缩阈值重建），与 GUI 设置面板同一路径，
+	// 避免"命令行改了不落盘 / 不生效"。
+	cr.commands["/maxlen"] = func(args []string) string {
+		if len(args) == 0 {
+			am := cr.rt.Config.ActiveModel()
+			return fmt.Sprintf("输出上限: %s | 输入预算: %s（0=不限制，自动取最大上下文 %s）",
+				fmtTokens(am.MaxOutputTokens), fmtTokens(am.MaxInputTokens), fmtTokens(am.MaxContext))
+		}
+		if len(args) < 2 {
+			return "用法: /maxlen output|input <tokens>（0=不限制）"
+		}
+		var n int
+		if _, err := fmt.Sscanf(args[1], "%d", &n); err != nil || n < 0 {
+			return "非法数值: " + args[1] + "（需为非负整数）"
+		}
+		key := ""
+		switch args[0] {
+		case "output", "out":
+			key = "model.max_output_tokens"
+		case "input", "in":
+			key = "model.max_input_tokens"
+		default:
+			return "非法类型: " + args[0] + "（可用: output / input）"
+		}
+		if _, err := cr.rt.ApplyConfigPatch(map[string]any{key: n}); err != nil {
+			return "设置失败: " + err.Error()
+		}
+		return fmt.Sprintf("已设置 %s: %s", args[0], fmtTokens(n))
+	}
+	cr.descs["/maxlen"] = "输出/输入长度上限: /maxlen [output|input] [tokens]"
+
+	// /think：多轮思考策略（轮次面"想几轮/是否验证"，与 /effort 参数面"每轮多长"正交）。
+	// policy/verify 走 runtime 会话级覆盖（可选接口断言：runtime 未落盘时优雅降级）；
+	// rounds/nudge/effort 走 ApplyConfigPatch 配置级热更新（与 /maxlen 同路径，持久化生效）。
+	cr.commands["/think"] = func(args []string) string { return cr.handleThink(args) }
+	cr.descs["/think"] = "多轮思考策略: /think [policy|verify|rounds|nudge|effort] [值]"
 
 	cr.commands["/threshold"] = func(args []string) string {
 		if len(args) == 0 {
@@ -519,6 +574,291 @@ func (cr *CommandRegistry) registerBuiltins() {
 	cr.descs["/trace"] = "查看最近 trace 记录（可带条数，如 /trace 50）"
 }
 
+// ── /think 多轮思考策略（设计 §3.8；轮次面与 /effort 参数面正交）──
+
+// thinkRuntime 可选能力接口：runtime 并行任务落盘会话级思考覆盖 API 后自动启用
+// （SetThinkingPolicy/SetVerifyPass 仅依赖内建类型，签名稳定、可提前断言）。
+// 用类型断言探测而非硬依赖 runtime 包新 API，保证本包在并行任务落盘前独立编译；
+// 未落盘时命令回显"运行时未就绪"。
+type thinkRuntime interface {
+	SetThinkingPolicy(p string) error
+	SetVerifyPass(v string) error
+}
+
+// thinkSubCmds /think 子命令合法取值（本地校验，非法值不打扰 runtime）。
+var thinkSubCmds = map[string][]string{
+	"policy": {"off", "auto", "strict", "clear"},
+	"verify": {"off", "auto", "on", "clear"},
+}
+
+// thinkUsage /think 用法总览（非法子命令/缺参统一回显）。
+const thinkUsage = "用法: /think [policy off|auto|strict|clear] [verify off|auto|on|clear] [rounds <0-20>] [nudge on|off] [effort none|escalate]"
+
+// handleThink /think 命令族入口：
+//
+//	/think                    展示策略全貌（配置值 + 可选实时进度）
+//	/think policy <v>         会话级覆盖（runtime API；未落盘回显未就绪）
+//	/think verify <v>         会话级覆盖（同上）
+//	/think rounds <n>         配置级：最少思考轮数（ApplyConfigPatch）
+//	/think nudge <on|off>     配置级：续思提示开关（ApplyConfigPatch）
+//	/think effort <v>         配置级：验证轮升档（ApplyConfigPatch）
+func (cr *CommandRegistry) handleThink(args []string) string {
+	if cr.rt == nil {
+		return "未连接运行时"
+	}
+	if len(args) == 0 {
+		return cr.thinkOverview()
+	}
+	switch args[0] {
+	case "policy", "verify":
+		return cr.thinkSetOverride(args[0], args[1:])
+	case "rounds":
+		if len(args) < 2 {
+			return "用法: /think rounds <0-20>（最少思考轮数，0=不强制）"
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n < 0 || n > 20 {
+			return "非法数值: " + args[1] + "（需为 0-20 整数）"
+		}
+		if _, err := cr.rt.ApplyConfigPatch(map[string]any{"thinking.min_think_rounds": n}); err != nil {
+			return "设置失败: " + err.Error()
+		}
+		return fmt.Sprintf("已设置 最少思考轮数: %d（配置级，持久化）", n)
+	case "nudge":
+		if len(args) < 2 || (args[1] != "on" && args[1] != "off") {
+			return "用法: /think nudge <on|off>（复杂任务轮间续思提示开关）"
+		}
+		v := args[1] == "on"
+		if _, err := cr.rt.ApplyConfigPatch(map[string]any{"thinking.nudge_enabled": v}); err != nil {
+			return "设置失败: " + err.Error()
+		}
+		if v {
+			return "已设置 nudge: 开（复杂任务轮间注入续思提示）"
+		}
+		return "已设置 nudge: 关"
+	case "effort":
+		if len(args) < 2 || (args[1] != "none" && args[1] != "escalate") {
+			return "用法: /think effort <none|escalate>（验证轮升档）"
+		}
+		if _, err := cr.rt.ApplyConfigPatch(map[string]any{"thinking.round_effort_policy": args[1]}); err != nil {
+			return "设置失败: " + err.Error()
+		}
+		if args[1] == "escalate" {
+			return "已设置 验证轮升档: escalate（验证轮按封顶档位下发 effort）"
+		}
+		return "已设置 验证轮升档: none（不升档，保持现状）"
+	default:
+		return thinkUsage
+	}
+}
+
+// thinkSetOverride 设置/清除会话级思考覆盖（policy/verify）。
+// 校验顺序：本地枚举校验 → 可选接口断言（未落盘回显未就绪）→ 调用 runtime。
+func (cr *CommandRegistry) thinkSetOverride(kind string, vals []string) string {
+	opts := thinkSubCmds[kind]
+	label := "思考策略"
+	if kind == "verify" {
+		label = "验证轮"
+	}
+	if len(vals) == 0 {
+		return fmt.Sprintf("用法: /think %s <%s>", kind, strings.Join(opts, "|"))
+	}
+	v := vals[0]
+	if !thinkInList(v, opts) {
+		return fmt.Sprintf("非法取值: %s（可用: %s）", v, strings.Join(opts, "/"))
+	}
+	tr, ok := any(cr.rt).(thinkRuntime)
+	if !ok {
+		return "运行时未就绪（多轮思考接口未加载），当前仅支持配置级设置: /think rounds|nudge|effort"
+	}
+	var err error
+	if kind == "policy" {
+		err = tr.SetThinkingPolicy(v)
+	} else {
+		err = tr.SetVerifyPass(v)
+	}
+	if err != nil {
+		return "设置失败: " + err.Error()
+	}
+	if v == "clear" {
+		return fmt.Sprintf("已清除%s覆盖（恢复配置值）", label)
+	}
+	out := fmt.Sprintf("已设置 %s: %s（会话覆盖，settings.json 持久化）", label, v)
+	if kind == "policy" && v != "off" {
+		if hint := thinkOrthogonalHint(cr.rt.Config.CLIDefaults.Effort); hint != "" {
+			out += "\n" + hint
+		}
+	}
+	return out
+}
+
+// thinkOverview /think 无参：展示策略全貌（配置值 + 可选实时进度）。
+// 实时状态经 runtime ModelInfo 的 thinking 可选通道读取（设计 §3.8）；
+// 拿不到（runtime 未落盘/任务未运行）时展示配置值——不依赖并行任务进度。
+func (cr *CommandRegistry) thinkOverview() string {
+	c := cr.rt.Config.Thinking
+	cfgPolicy := c.Policy
+	if cfgPolicy == "" {
+		cfgPolicy = "off"
+	}
+	verify := c.VerifyPass
+	if verify == "" {
+		verify = "off"
+	}
+	live := thinkLiveStatus(cr.rt)
+	// 生效策略：实时状态优先（含会话覆盖后的实际值），否则配置值。
+	policy := cfgPolicy
+	if p := mapStr(live, "policy"); p != "" {
+		policy = p
+	}
+	if v := mapStr(live, "verify"); v != "" {
+		verify = v
+	}
+	// 来源：runtime 提供 source 则按其口径；否则按"生效≠配置 → 会话覆盖"推导。
+	src := "配置"
+	if s := mapStr(live, "source"); s != "" {
+		src = thinkSourceLabel(s)
+	} else if policy != cfgPolicy {
+		src = "会话覆盖"
+	}
+	effortSeg := c.RoundEffortPolicy
+	if effortSeg == "" {
+		effortSeg = "none"
+	}
+	if effortSeg == "escalate" {
+		cap := c.RoundEffortCap
+		if cap == "" {
+			cap = "max"
+		}
+		effortSeg = "escalate(封顶" + cap + ")"
+	}
+	maxRounds := c.MaxThinkRounds
+	if maxRounds <= 0 {
+		maxRounds = 3 // 运行时 Normalize 同口径
+	}
+	nudgeSeg := "关"
+	if c.NudgeEnabled {
+		n := c.NudgeMax
+		if n <= 0 {
+			n = 2 // 运行时 Normalize 同口径
+		}
+		nudgeSeg = fmt.Sprintf("开(上限%d)", n)
+	}
+	out := fmt.Sprintf("思考策略: %s（来源: %s）\n最少轮数: %d | 续轮上限: %d | 验证轮: %s | nudge: %s | 升档: %s",
+		policy, src, c.MinThinkRounds, maxRounds, verify, nudgeSeg, effortSeg)
+	if r := mapInt(live, "round"); r > 0 {
+		mr := mapInt(live, "maxRound")
+		if mr <= 0 {
+			mr = maxRounds
+		}
+		line := fmt.Sprintf("\n进度: 轮 %d/%d", r, mr)
+		if b, _ := live["verifying"].(bool); b {
+			line += " · 验证中"
+		}
+		out += line
+	}
+	if policy != "off" {
+		if hint := thinkOrthogonalHint(cr.rt.Config.CLIDefaults.Effort); hint != "" {
+			out += "\n" + hint
+		}
+	}
+	return out
+}
+
+// thinkOrthogonalHint /effort off 与思考策略的矛盾提示（设计 §3.8：effort=off
+// 优先、不发思考字段）。effort != off 时返回 ""。
+func thinkOrthogonalHint(effort string) string {
+	if effort == "off" {
+		return "提示: 当前思考档位 off（/effort off），思考不会实际发生；如需启用请先 /effort medium"
+	}
+	return ""
+}
+
+// thinkLiveStatus 读取 runtime 多轮思考实时状态（可选通道，拿不到返回 nil）：
+// ModelInfo() 的 "thinking" 字段（设计 §3.8：runtime 侧扩展的稳定 map 通道）。
+// 并行任务未落盘/无活动任务时自然缺失，调用方回退配置展示。
+func thinkLiveStatus(rt *runtime.Runtime) map[string]any {
+	if rt == nil {
+		return nil
+	}
+	mi := rt.ModelInfo()
+	if mi == nil {
+		return nil
+	}
+	return toMapAny(mi["thinking"])
+}
+
+// toMapAny 把任意 JSON 化值规整为 map（runtime 侧可能放 map[string]any 或
+// 结构体；结构体经 JSON 往返兜底，避免与并行任务的类型选择硬耦合）。
+func toMapAny(v any) map[string]any {
+	if v == nil {
+		return nil
+	}
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// mapStr 从状态 map 安全取字符串（缺失/类型不符返回 ""）。
+func mapStr(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
+}
+
+// mapInt 从状态 map 安全取整数（兼容 int / int64 / float64 / json.Number）。
+func mapInt(m map[string]any, key string) int {
+	if m == nil {
+		return 0
+	}
+	switch v := m[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	}
+	return 0
+}
+
+// thinkSourceLabel 来源英文口径 → 中文展示（未知值原样返回）。
+func thinkSourceLabel(s string) string {
+	switch s {
+	case "override", "session":
+		return "会话覆盖"
+	case "config":
+		return "配置"
+	case "default", "off":
+		return "默认"
+	}
+	return s
+}
+
+// thinkInList 判断值是否命中合法选项清单（/think 本地枚举校验）。
+func thinkInList(s string, opts []string) bool {
+	for _, opt := range opts {
+		if s == opt {
+			return true
+		}
+	}
+	return false
+}
+
 func (cr *CommandRegistry) Execute(input string) (string, bool) {
 	if !strings.HasPrefix(input, "/") {
 		return "", false
@@ -640,4 +980,19 @@ func truncStr(s string, n int) string {
 		return s
 	}
 	return string(runes[:n-3]) + "..."
+}
+
+// fmtTokens 把 token 数格式化为人类可读文本（0 显示"不限制"，千位以上用 k 缩写）。
+// 用于 /effort 与 /maxlen 的回显，避免用户看到裸数字 393216 难以换算。
+func fmtTokens(n int) string {
+	if n <= 0 {
+		return "不限制"
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n%1000 == 0 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }

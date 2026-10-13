@@ -32,6 +32,7 @@ import (
 	"github.com/contextloom/contextloom-agent/internal/preprocessor"
 	sbox "github.com/contextloom/contextloom-agent/internal/sandbox"
 	"github.com/contextloom/contextloom-agent/internal/scheduler"
+	"github.com/contextloom/contextloom-agent/internal/thinkmgr"
 	"github.com/contextloom/contextloom-agent/internal/tools"
 	"github.com/contextloom/contextloom-agent/internal/trace"
 	"github.com/contextloom/contextloom-agent/internal/vision"
@@ -73,6 +74,14 @@ type Runtime struct {
 
 	// 目标循环管理器（goal 模式状态机 + 持久化）
 	goalMgr *goalmgr.Manager
+
+	// 多轮思考策略（M2/M7/M11/M12）：会话级覆盖（settings.json 的 thinking_session
+	// 持久化）+ 最近任务思考快照（BiasRushed 度量合并）。字段须声明在 runtime.go
+	// （Go 不支持跨文件加字段）；方法实现见 thinking.go。
+	thinkStrategy thinkmgr.Strategy
+	thinkOverride thinkOverride
+	thinkSnap     thinkSnapshot
+	thinkMu       sync.Mutex
 
 	// 文件操作审计器（企业治理审计追踪，JSONL 按日轮转）
 	auditor *audit.Auditor
@@ -149,7 +158,13 @@ type Runtime struct {
 	// 请求（status.bar 轮询/loadSession/点击）在 historyMu 上排队，界面表现为
 	// "无反应+状态栏不刷+历史不加载"（真实用户反馈根因）。改为锁内只收集、
 	// 锁外由 flushEvictPending 批量入索引，锁持有时间降到 O(1)。
+	// evictMu 单独保护收集区：渐进压缩移出 historyMu 后，回调与 flush 并发。
+	evictMu      sync.Mutex
 	evictPending []types.ContextBlock
+	// onAutoCompact 自动压缩发生后的回调（GUI server 注入广播；nil=TUI/ACP 零开销）。
+	// 参数为压缩所属会话 ID。AddToHistory 渐进压缩成功并持久化快照后触发，
+	// 前端据此自动刷新加载完整历史（压缩后无需切走再切回才恢复显示）。
+	onAutoCompact func(sid string)
 	// Trace 轻量可观测记录器（JSONL，按日轮转；trace.enabled=false 时为空操作）
 	Trace *trace.Recorder
 	// MCPClients 外部 MCP server 客户端（mcp.servers 配置启动）
@@ -441,6 +456,8 @@ func New(cfg *config.Config) (*Runtime, error) {
 		sandbox:  sandbox,
 		bus:      bus,
 	}
+	// 基础思考策略（配置面 9 字段 → 轮次面 Strategy；会话覆盖在 effectiveThinkStrategy 叠加）。
+	rt.thinkStrategy = strategyFromThinkingConfig(cfg.Thinking)
 	// 初始化轻量 trace（可观测性：agent 轮次/工具调用/耗时/错误 JSONL）
 	traceEnabled := true
 	if cfg.Trace.Enabled != nil {
@@ -471,8 +488,13 @@ func New(cfg *config.Config) (*Runtime, error) {
 		rt.Config.CLIDefaults.Effort = "max"
 	}
 	rt.Backend.SetReasoningEffort(rt.Config.CLIDefaults.Effort)
-	// 初始化上下文预算控制器（token 预算驱动，接线激活预设的 max_context）
-	rt.ctxBudget = ctxmgr.NewTokenBudget(cfg.ActiveModel().MaxContext)
+	// 独立生成参数下发（输出上限/输入预算/思考开关）：
+	// 顺序铁律——先档位、后开关。档位设置会把"off→思考档"的 thinkingEnabled
+	// 复位为 nil（未显式设置），随后的 SetThinkingEnabled 才代表配置的最终意志；
+	// 反序会被档位复位抹掉，导致 thinking_enabled=false 静默失效。
+	rt.applyGenerationParams(rt.Backend)
+	// 初始化上下文预算控制器（token 预算驱动，接线有效输入预算）
+	rt.ctxBudget = ctxmgr.NewTokenBudget(rt.effectiveInputBudget())
 	rt.ctxBudget.ApplyConfig(
 		cfg.Context.CompactRatio,
 		cfg.Context.HardRatio,
@@ -902,6 +924,10 @@ func (rt *Runtime) CreateTask(directive, task string, payload any, priority int)
 	agent := rt.Executor.SpawnAgent(id, tc, rt.selectBackend(context.Background(), modelgateway.Req{Task: "task"}))
 	agent.SetSessionID(rt.GetSessionID())
 	agent.SetTracer(rt)
+	// 多轮思考策略装配（M2/M7）：policy=off 时 buildThinkTracker 返回 nil → executor 全部短路（零回归）。
+	agent.SetThinkPolicy(rt.buildThinkTracker(tc.Task, tc.Mode, 0, ""))
+	agent.SetRoundEffortHook(rt.applyRoundEffort)
+	agent.SetVerifierHook(rt.makeVerifierHook()) // M9：收尾前只读复核（条件不满足零回归）
 	return agent, nil
 }
 
@@ -1072,10 +1098,56 @@ func (rt *Runtime) CurrentModel() string {
 	return rt.Config.ActiveModelName
 }
 
+// SetEffort 设置思考深度档位并持久化（TUI /effort、GUI model.set 共用入口）。
+// 支持的档位见 config.thinkingLengthOptions：off（关闭思考）/low/medium/high/
+// xhigh/max（思考并控制强度）。"off" 由 DeepSeekBackend 特殊处理为
+// thinking:{type:disabled} 且不发 reasoning_effort（对齐 dsh）。
 func (rt *Runtime) SetEffort(effort string) {
 	rt.Config.CLIDefaults.Effort = effort
 	rt.Backend.SetReasoningEffort(effort)
+	// 档位切换后重新下发配置中的独立生成参数：档位设为 off 时后端会把
+	// thinkingEnabled 置 false，而配置可能显式要求思考（thinking_enabled=true
+	// 或 thinking_length 指定档位）——此处按"配置优先"重新收敛，避免
+	// /effort off 之后配置语义被永久覆盖。
+	rt.applyGenerationParams(rt.Backend)
 	rt.saveSettings()
+}
+
+// effectiveInputBudget 计算有效输入预算（发送前压缩与 ctxBudget 的阈值来源）：
+// 优先用户显式配置的 max_input_tokens（>0），否则回退激活预设的 max_context。
+// 输出上限 max_output_tokens 不参与——输入与输出预算解耦是本次改造的核心语义，
+// 混用会让"调大输出"意外挤占输入侧压缩阈值。
+func (rt *Runtime) effectiveInputBudget() int {
+	am := rt.Config.ActiveModel()
+	if am.MaxInputTokens > 0 {
+		return am.MaxInputTokens
+	}
+	return am.MaxContext
+}
+
+// applyGenerationParams 把激活预设的三项独立生成参数下发到后端。
+// 后端不支持 GenerationParamsBackend 时静默跳过（保持原有行为，不报错）。
+//
+// 调用时机铁律：必须在 SetReasoningEffort 之后调用。档位设置会把
+// "off→思考档"的 thinkingEnabled 复位为 nil，若先设开关再设档位，
+// 配置的 thinking_enabled=false 会被复位抹掉而静默失效。
+func (rt *Runtime) applyGenerationParams(b model.Backend) {
+	if b == nil || rt.Config == nil {
+		return
+	}
+	am := rt.Config.ActiveModel()
+	// thinking 开关解析：配置显式值优先；未配置（nil）时若 thinking_length
+	// 指定了档位，则由该档位决定（off → 关闭；其余 → 开启）；两者都未配置
+	// 时传 nil，保持历史行为（只发 reasoning_effort，不发 thinking 字段）。
+	var thinking *bool
+	if am.ThinkingEnabled != nil {
+		v := *am.ThinkingEnabled
+		thinking = &v
+	} else if am.ThinkingLength != "" {
+		v := am.ThinkingLength != "off"
+		thinking = &v
+	}
+	model.ApplyGenerationParams(b, am.MaxOutputTokens, am.MaxInputTokens, thinking)
 }
 
 // UpdateActivePreset 修改当前激活预设的字段（写透到 models 列表对应项）。
@@ -1172,6 +1244,39 @@ func (rt *Runtime) AcceptVocab(term string) bool {
 // RejectVocab 拒绝词汇提案
 func (rt *Runtime) RejectVocab(term string) bool {
 	return rt.Preproc.Vocab().Reject(term)
+}
+
+// SetOnAutoCompact 注入自动压缩广播回调（GUI server 注入；nil=无广播）。
+// 线程安全：回调只在 AddToHistory 压缩收尾路径读取，GUI server 在启动早期
+// （WS 服务起来之前）注入一次，此后不再变更。
+func (rt *Runtime) SetOnAutoCompact(fn func(sid string)) {
+	rt.onAutoCompact = fn
+}
+
+// evictMu 保护锁外压缩路径的收集区（evictPending/evictSeq）：渐进压缩已
+// 移出 historyMu 写锁，回调（indexCompressedEvictedFor）与 flush（批量入
+// 索引）都可能在任意 goroutine 并发执行，原实现裸读写会 data race。
+
+func (rt *Runtime) MergeSummaryInto(dst *ctxmgr.TokenBudget) {
+	// 由调用方在回写压缩结果时调用：把锁外压缩副本累积的滚动摘要与压缩
+	// 审计合并回现役预算（防摘要/审计丢失）。dst 为 nil（预算已整体替换）
+	// 时丢弃。
+	if dst == nil {
+		return
+	}
+	rt.historyMu.Lock()
+	if cur := rt.ctxBudget; cur != nil && cur != dst {
+		// 现役预算与压缩副本不同（热更新替换过）：合并副本摘要与审计
+		if s := dst.Summary; s != "" {
+			cur.Summary = s
+		}
+		for _, a := range dst.AuditLog() {
+			cur.MergeAudit(a)
+		}
+	} else if cur == dst {
+		// 同一对象（无热更新）：摘要/审计已就位，无需合并
+	}
+	rt.historyMu.Unlock()
 }
 
 func (rt *Runtime) SetThreshold(t float64) {
@@ -1380,7 +1485,9 @@ func (rt *Runtime) applyLiveConfig(patch map[string]any) []string {
 	am := rt.Config.ActiveModel()
 	rt.historyMu.Lock()
 	old := rt.ctxBudget
-	rt.ctxBudget = ctxmgr.NewTokenBudget(am.MaxContext)
+	// 预算取有效输入预算（max_input_tokens 优先，回退 max_context）：
+	// 与启动路径同一口径，保证设置面板改 max_input_tokens 后压缩阈值立即生效。
+	rt.ctxBudget = ctxmgr.NewTokenBudget(rt.effectiveInputBudget())
 	rt.ctxBudget.ApplyConfig(
 		rt.Config.Context.CompactRatio,
 		rt.Config.Context.HardRatio,
@@ -1413,6 +1520,12 @@ func (rt *Runtime) applyLiveConfig(patch map[string]any) []string {
 			}
 			ds.SetSendEffort(se)
 		}
+		// 独立生成参数热更新（输出上限/输入预算/思考开关）：
+		// 必须在 SetReasoningEffort 之后——档位设置会把"off→思考档"的
+		// thinkingEnabled 复位为 nil，先设开关再设档位会让配置静默失效。
+		// 走 model.ApplyGenerationParams 统一入口（网关 handle 亦实现该接口，
+		// 三项参数随池内实例轮换保持一致）。
+		rt.applyGenerationParams(rt.Backend)
 	}
 
 	// 3) 检索参数热更新
@@ -1511,7 +1624,7 @@ func (rt *Runtime) LoadSession(uuid string) (*types.Session, *types.Session, err
 		// 并把新压缩结果持久化（CompactedSeq 推进到日志最新 Seq）
 		if rt.ctxBudget != nil {
 			sid := rt.currentSessionID
-			compacted, changed := ctxmgr.CompactToBudgetWithEvict(rt.conversationHistory, rt.ctxBudget, func(m types.Message) { rt.indexCompressedEvictedFor(sid, m) })
+			compacted, changed := rt.compactHistoryWithThinking(rt.conversationHistory, sid)
 			if changed {
 				rt.conversationHistory = compacted
 				if sm := rt.ctxBudget.SummaryMessage(); sm != nil {
@@ -1539,7 +1652,7 @@ func (rt *Runtime) LoadSession(uuid string) (*types.Session, *types.Session, err
 		// 预算压缩 + 滚动摘要注入（复用 AddToHistory 同一套策略）
 		if rt.ctxBudget != nil {
 			sid := rt.currentSessionID
-			compacted, changed := ctxmgr.CompactToBudgetWithEvict(rt.conversationHistory, rt.ctxBudget, func(m types.Message) { rt.indexCompressedEvictedFor(sid, m) })
+			compacted, changed := rt.compactHistoryWithThinking(rt.conversationHistory, sid)
 			if changed {
 				rt.conversationHistory = compacted
 				if sm := rt.ctxBudget.SummaryMessage(); sm != nil {
@@ -1722,6 +1835,10 @@ func (rt *Runtime) indexCompressedEvictedFor(sid string, m types.Message) {
 	if !ok || s == "" || strings.HasPrefix(s, "[历史摘要]") {
 		return
 	}
+	// 收集区独立锁：回调可能来自 historyMu 锁内（LoadSession 路径）也可能
+	// 来自锁外压缩 goroutine（AddToHistory 渐进压缩），用独立小锁避免锁序
+	// 纠缠；收集 O(1)、无阻塞。
+	rt.evictMu.Lock()
 	rt.evictSeq++
 	block := types.ContextBlock{
 		ID:        fmt.Sprintf("compressed:%d:%d", time.Now().UnixNano(), rt.evictSeq),
@@ -1731,17 +1848,22 @@ func (rt *Runtime) indexCompressedEvictedFor(sid string, m types.Message) {
 		SessionID: sid,
 	}
 	rt.evictPending = append(rt.evictPending, block)
+	rt.evictMu.Unlock()
 }
 
-// flushEvictPending 把锁内收集的压缩原文批量写入 Harness 索引（锁外调用）。
+// flushEvictPending 把收集的压缩原文批量写入 Harness 索引（锁外调用）。
 // 必须在 historyMu 已解锁、sid 上下文明确时调用（从锁内提取后调用）。
 // 空收集直接返回（零开销）；Harness 关闭时清空收集区。
+// evictMu 保护：与回调并发安全；Harness.Index 在锁外调用（不持任何 Runtime 锁）。
 func (rt *Runtime) flushEvictPending() {
+	rt.evictMu.Lock()
 	if len(rt.evictPending) == 0 {
+		rt.evictMu.Unlock()
 		return
 	}
 	blocks := rt.evictPending
 	rt.evictPending = nil
+	rt.evictMu.Unlock()
 	if rt.Harness == nil {
 		return
 	}
@@ -2016,6 +2138,11 @@ func (rt *Runtime) launchAgent(ctx context.Context, task types.TaskCreate, input
 	}
 	agent.SetConversationHistory(convHistory)
 	agent.SetTracer(rt)
+	// 多轮思考策略装配（M2/M7/M11/M12）：策略关闭时 nil → executor 零开销（零回归）；
+	// 图片数取自任务的多模态片段（buildThinkTracker 复杂度信号输入）。
+	agent.SetThinkPolicy(rt.buildThinkTracker(task.Task, mode, len(task.Images), ""))
+	agent.SetRoundEffortHook(rt.applyRoundEffort)
+	agent.SetVerifierHook(rt.makeVerifierHook()) // M9：收尾前只读复核（条件不满足零回归）
 
 	// 每轮检查点落盘（对标 LangGraph checkpointer：异常中断后可从最新快照恢复）
 	// 主任务含消息体（恢复用，内部裁剪到最近 40 条）；子任务不含（从不恢复）
@@ -2189,33 +2316,58 @@ func (rt *Runtime) AddToHistory(role, content string) {
 	// eventText 是事件日志持久化用纯文本（图片以 [图片: 路径] 标记）
 	msg, eventText := rt.buildHistoryMessage(role, content)
 	rt.historyMu.Lock()
+	// ⚠️ 并行流回写与压缩互不阻塞（"多任务进行中压缩导致对话中断"根因之二）：
+	// 压缩（CompactToBudgetWithEvict 含逐条截断/摘要/二次兜底，长历史下
+	// 可达百毫秒~秒级）旧实现整段发生在 historyMu 写锁内——此刻任何其他
+	// 会话的流回写（AddToHistoryForSession→AddToHistory）、ContextUsageInfo
+	// 轮询、launchAgent 的 GetConversationHistory 全部在锁上排队，GUI 表现
+	// 为"流式卡住、点击无响应、对话看似中断"。
+	// 现锁内只做：追加 + 取快照 + 指针交换（O(1)）；渐进压缩在锁外执行，
+	// 完成后短暂取锁用 CAS 语义回写（期间有并发追加则放弃本次压缩结果，
+	// 由下一次 AddToHistory 自然重试压缩——正确性优先，绝不丢消息）。
 	rt.conversationHistory = append(rt.conversationHistory, msg)
-
-	// token 预算驱动的渐进式压缩（ctxmgr）：
-	// 完整保留 → 前缀截断 → 丢弃最旧（累积滚动摘要）→ 二次截断兜底。
-	// 替代旧版"按条数断崖截断（>92% 砍到剩 3 条）"。
-	compacted := false
-	// 压缩入索引的原文归属当前会话（锁内读取 sid，避免 RWMutex 重入）
+	snapshot := make([]types.Message, len(rt.conversationHistory))
+	copy(snapshot, rt.conversationHistory)
 	addSid := rt.currentSessionID
-	if rt.ctxBudget != nil {
-		compactedList, changed := ctxmgr.CompactToBudgetWithEvict(rt.conversationHistory, rt.ctxBudget, func(m types.Message) { rt.indexCompressedEvictedFor(addSid, m) })
-		if changed {
-			rt.conversationHistory = compactedList
-			compacted = true
-			// 注入滚动摘要（防断崖式失忆），避免重复注入
-			if sm := rt.ctxBudget.SummaryMessage(); sm != nil {
+	rt.historyMu.Unlock()
+
+	compacted := false
+	// 预算快照 + 副本压缩：锁外压缩耗时期间配置热更新可能整体替换
+	// rt.ctxBudget 指针，直接用旧引用会把摘要/审计写到已退役对象上。
+	// 取指针快照 → Clone 副本压缩 → 回写前 MergeSummaryInto 合并摘要。
+	rt.historyMu.RLock()
+	budgetSnap := rt.ctxBudget
+	rt.historyMu.RUnlock()
+	if budgetSnap != nil {
+		bc := budgetSnap.Clone()
+		// 锁外压缩快照（不阻塞并行流回写/轮询）
+		compactedList, changed := rt.compactHistoryWithThinking(snapshot, addSid, bc)
+		if changed && compactedList != nil {
+			// 摘要注入（锁外）
+			if sm := bc.SummaryMessage(); sm != nil {
 				first := ""
-				if len(rt.conversationHistory) > 0 {
-					first, _ = rt.conversationHistory[0].Content.(string)
+				if len(compactedList) > 0 {
+					first, _ = compactedList[0].Content.(string)
 				}
 				if !strings.HasPrefix(first, "[历史摘要]") {
-					rt.conversationHistory = append([]types.Message{*sm}, rt.conversationHistory...)
+					compactedList = append([]types.Message{*sm}, compactedList...)
 				}
 			}
-			// 摘要注入后二次压缩，确保总量回到安全红线内
-			if compacted2, _ := ctxmgr.CompactToBudgetWithEvict(rt.conversationHistory, rt.ctxBudget, func(m types.Message) { rt.indexCompressedEvictedFor(addSid, m) }); compacted2 != nil {
-				rt.conversationHistory = compacted2
+			// 摘要注入后二次压缩兜底（仍锁外）
+			if compacted2, _ := ctxmgr.CompactToBudgetWithEvict(compactedList, bc, func(m types.Message) { rt.indexCompressedEvictedFor(addSid, m) }); compacted2 != nil {
+				compactedList = compacted2
 			}
+			// 回写：仅当并发期间无人再追加（长度仍等于快照长度）才采纳压缩结果；
+			// 有新追加则放弃（保留全量），压缩由后续 AddToHistory 重试。
+			rt.historyMu.Lock()
+			if len(rt.conversationHistory) == len(snapshot) {
+				rt.conversationHistory = compactedList
+				compacted = true
+			}
+			rt.historyMu.Unlock()
+			// 副本累积的滚动摘要合并回现役预算（无论回写是否被并发打断，
+			// 丢弃内容已累积进摘要——不合并会丢摘要）
+			rt.MergeSummaryInto(bc)
 		}
 	}
 	// 压缩/截断等操作结束后，锁内取出会话 ID（与写端同锁，防 data race），
@@ -2224,8 +2376,8 @@ func (rt *Runtime) AddToHistory(role, content string) {
 	// 只有先写事件再写快照，快照覆盖点才包含本消息；否则重连加载时本消息
 	// 会以增量身份与快照重复合并（历史缺陷：压缩后新对话在重连加载时丢失或错乱）。
 	sid := rt.currentSessionID
-	rt.historyMu.Unlock()
-	// 锁外批量写入压缩原文索引（AddToHistory 渐进压缩可能收集了多条）
+	// 锁外批量写入压缩原文索引（渐进压缩可能收集了多条；Harness.Index 持
+	// 全局锁全量重建，绝不能在 historyMu 持有期间调用）
 	rt.flushEvictPending()
 	eventSeq := int64(0)
 	if rt.Memory != nil && sid != "" {
@@ -2245,6 +2397,15 @@ func (rt *Runtime) AddToHistory(role, content string) {
 	}
 	if compacted && sid != "" {
 		rt.persistCompactionSnapshot(sid, eventSeq)
+		// 自动压缩广播（GUI）：AddToHistory 是 GUI/TUI/渠道共用的压缩入口，
+		// 自动压缩（阈值触发）发生后同步推送 ctx.compressed 事件，前端收到
+		// 后自动重新拉取会话历史（事件日志完整重放）刷新消息区——压缩不再
+		// 需要"切走再切回"才恢复显示（用户实测痛点：压缩后历史记录显示变少，
+		// 切换会话再切回才恢复）。onAutoCompact 由 GUI server 注入（广播），
+		// TUI/ACP 场景为 nil（零开销零回归）。
+		if fn := rt.onAutoCompact; fn != nil {
+			fn(sid)
+		}
 	}
 }
 
@@ -2927,7 +3088,10 @@ func (rt *Runtime) OverseerEvaluate(response string) (bool, types.Score, types.O
 	// goal 模式且 spec 未过门槛时早产 [GOAL_DONE] 被判定为偏差；
 	// 正文声称"测试通过/全面检查"但本轮无工具证据 → 扣分。
 	// 偏差命中记录进 rt 供 GoalOnRoundEnd 追加缺陷条目。
-	if hits := rt.biasHits(response); len(hits) > 0 {
+	hits := rt.biasHits(response)
+	// M11 度量合并：复杂任务草率回答偏差（策略未启用时零命中——零回归）。
+	hits = append(hits, rt.rushedBiasHits()...)
+	if len(hits) > 0 {
 		penalty := overseer.TotalPenalty(hits)
 		score = types.Score(float64(score) - penalty)
 		if score < 0 {
@@ -3083,6 +3247,28 @@ func (rt *Runtime) HasOverseer() bool {
 }
 
 // SpawnTask 实现 tools.TaskSpawner：模型自主调用 spawn_task 时触发，
+// makeVerifierHook 构造 M9 复核执行钩子：strict+complex 任务收尾前把产出送审一次。
+// 复用 rt.SpawnTask 既有通道（只读评审纪律由任务文本约束：不写产出、只报告问题清单）；
+// 独立 ctx（background + 沙箱继承 + 3m 超时）——复核不拖垮主任务收尾（超时有界）。
+func (rt *Runtime) makeVerifierHook() func(req *executor.VerifierRequest) (string, error) {
+	return func(req *executor.VerifierRequest) (string, error) {
+		var b strings.Builder
+		b.WriteString(executor.VerifierTaskPrefix + "：对以下产出做只读复核。纪律：不写产出、不改代码、不修改任何文件，只报告问题清单（通过项/问题项/证据）。\n")
+		b.WriteString("复核清单：\n")
+		for _, c := range req.VerifierChecks() {
+			b.WriteString("- " + c + "\n")
+		}
+		b.WriteString("\n被复核产出：\n" + req.Target)
+		ctx := context.Background()
+		if rt.sbFS != nil {
+			ctx = sbox.WithSandbox(ctx, rt.sbFS)
+		}
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		defer cancel()
+		return rt.SpawnTask(ctx, "", tools.TaskSpec{Directive: "TEST", Task: b.String()})
+	}
+}
+
 // 创建子 Agent（继承父对话上下文 + 自动批准，§9.4 上下文继承），
 // 注入 ContextManifest（§5.1 入口契约），同步执行后将结果与监工评分返回给主 Agent。
 func (rt *Runtime) SpawnTask(ctx context.Context, parentID string, spec tools.TaskSpec) (string, error) {
@@ -3166,6 +3352,11 @@ func (rt *Runtime) SpawnTask(ctx context.Context, parentID string, spec tools.Ta
 	agent := rt.Executor.SpawnAgent(childID, task, rt.resolveSubAgentBackend(ctx, spec.Model, emp, backendReq))
 	agent.SetTools(filteredTools)
 	agent.SetTracer(rt)
+	// 子 Agent 同样装配多轮思考策略（M2/M7；task 文本=spec.Task）：策略关闭时 nil（零回归）。
+	agent.SetThinkPolicy(rt.buildThinkTracker(task.Task, task.Mode, len(task.Images), ""))
+	agent.SetRoundEffortHook(rt.applyRoundEffort)
+	// M9：子 Agent 同样可送审（复核任务自身防递归见 executor.maybeVerifierHandoff）。
+	agent.SetVerifierHook(rt.makeVerifierHook())
 	agent.SetDepth(1)
 	// 子 Agent 归属父会话：检索/压缩入索引按会话隔离，防跨会话串扰
 	agent.SetSessionID(rt.GetSessionID())
@@ -3388,6 +3579,18 @@ func (rt *Runtime) ModelInfo() map[string]any {
 	if rt.Backend != nil && rt.Backend.MaxContext() > 0 {
 		maxCtx = rt.Backend.MaxContext()
 	}
+	// 独立长度参数回显：设置面板/状态栏据此展示"输出 64k / 输入不限制"。
+	// 读后端实际生效值（而非配置值）——网关句柄会透传池内实例的真实状态，
+	// 未实现 GenerationParamsBackend 的后端返回 0（=不限制），语义一致。
+	maxOut, maxIn := am.MaxOutputTokens, am.MaxInputTokens
+	thinkingEnabled := true
+	if gp, ok := rt.Backend.(model.GenerationParamsBackend); ok {
+		maxOut, maxIn = gp.MaxOutputTokens(), gp.MaxInputTokens()
+		thinkingEnabled = gp.ThinkingEnabled()
+	}
+	if am.ThinkingEnabled != nil {
+		thinkingEnabled = *am.ThinkingEnabled
+	}
 	return map[string]any{
 		"backend":     backend,
 		"provider":    am.Backend,
@@ -3395,6 +3598,10 @@ func (rt *Runtime) ModelInfo() map[string]any {
 		"visionModel": rt.Config.ActiveModel().VisionModel, // 识图模型（空=不切换）
 		"effort":      effort,
 		"maxContext":  maxCtx,
+		// 独立长度参数（0=不限制，自动取最大上下文）
+		"maxOutputTokens": maxOut,
+		"maxInputTokens":  maxIn,
+		"thinkingEnabled": thinkingEnabled,
 	}
 }
 

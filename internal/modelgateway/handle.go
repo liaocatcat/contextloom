@@ -26,12 +26,22 @@ type handle struct {
 	temp   *float64
 	topP   *float64
 	effort *string
+	// maxOut/maxIn/thinking 独立生成参数缓存（与 temp/topP/effort 同模式：
+	// 缓存在句柄上、挑中实例后由 applyParams 下发；nil=不下发保持实例默认）。
+	// 对齐 DeepSeek Harness：输出/输入长度与思考开关可独立于上下文窗口配置。
+	maxOut   *int
+	maxIn    *int
+	thinking *bool
 	// streamTools 流式请求 tools 参数（透传底层实例；nil=不发送）
 	streamTools []types.ToolDefinition
 }
 
 // 编译期断言：handle 实现完整 model.Backend 接口。
 var _ model.Backend = (*handle)(nil)
+
+// 编译期断言：handle 实现可选的独立生成参数透传接口（输出/输入上限与思考开关，
+// 类型断言探测，不扩展 Backend 接口本体）。
+var _ model.GenerationParamsBackend = (*handle)(nil)
 
 // Degraded 报告句柄是否因熔断降级产生（true 时输出应带"已降级"提示）。
 func (h *handle) Degraded() bool { return h.degraded }
@@ -103,6 +113,73 @@ func (h *handle) Temperature() float64 {
 	return h.probe().inner.Temperature()
 }
 
+// ── 独立生成参数（输出/输入上限 + 思考开关，透传池内实例）──
+
+// SetMaxOutputTokens 缓存独立输出上限（n<=0 表示未设置，回退实例 maxContext）。
+func (h *handle) SetMaxOutputTokens(n int) {
+	h.setMu.Lock()
+	defer h.setMu.Unlock()
+	v := n
+	h.maxOut = &v
+}
+
+// MaxOutputTokens 返回独立输出上限（有缓存返回缓存，否则探针底层实例；
+// 底层不支持 GenerationParamsBackend 时返回 0）。
+func (h *handle) MaxOutputTokens() int {
+	h.setMu.Lock()
+	defer h.setMu.Unlock()
+	if h.maxOut != nil {
+		return *h.maxOut
+	}
+	if gp, ok := h.probe().inner.(model.GenerationParamsBackend); ok {
+		return gp.MaxOutputTokens()
+	}
+	return 0
+}
+
+// SetMaxInputTokens 缓存独立输入预算（n<=0 表示未设置，回退实例 maxContext）。
+func (h *handle) SetMaxInputTokens(n int) {
+	h.setMu.Lock()
+	defer h.setMu.Unlock()
+	v := n
+	h.maxIn = &v
+}
+
+// MaxInputTokens 返回独立输入预算（语义同 MaxOutputTokens）。
+func (h *handle) MaxInputTokens() int {
+	h.setMu.Lock()
+	defer h.setMu.Unlock()
+	if h.maxIn != nil {
+		return *h.maxIn
+	}
+	if gp, ok := h.probe().inner.(model.GenerationParamsBackend); ok {
+		return gp.MaxInputTokens()
+	}
+	return 0
+}
+
+// SetThinkingEnabled 缓存思考开关（true=思考开启；false=关闭思考）。
+func (h *handle) SetThinkingEnabled(on bool) {
+	h.setMu.Lock()
+	defer h.setMu.Unlock()
+	v := on
+	h.thinking = &v
+}
+
+// ThinkingEnabled 返回思考开关（有缓存返回缓存，否则探针底层实例；
+// 底层不支持时返回 false）。
+func (h *handle) ThinkingEnabled() bool {
+	h.setMu.Lock()
+	defer h.setMu.Unlock()
+	if h.thinking != nil {
+		return *h.thinking
+	}
+	if gp, ok := h.probe().inner.(model.GenerationParamsBackend); ok {
+		return gp.ThinkingEnabled()
+	}
+	return false
+}
+
 // applyParams 把缓存的参数应用到实例（无缓存则保持实例默认）。
 func (h *handle) applyParams(ins *poolInstance) {
 	h.setMu.Lock()
@@ -112,6 +189,22 @@ func (h *handle) applyParams(ins *poolInstance) {
 	}
 	if h.topP != nil {
 		ins.inner.SetTopP(*h.topP)
+	}
+	// 独立生成参数（可选接口）：先下发思考开关，后下发 effort——保证
+	// effort="off"（关闭思考语义）最终生效，避免出现 thinking:enabled +
+	// reasoning_effort:"off" 的自相矛盾组合（对齐 dsh：思考关闭时只允许 off）。
+	if h.maxOut != nil || h.maxIn != nil || h.thinking != nil {
+		if gp, ok := ins.inner.(model.GenerationParamsBackend); ok {
+			if h.maxOut != nil {
+				gp.SetMaxOutputTokens(*h.maxOut)
+			}
+			if h.maxIn != nil {
+				gp.SetMaxInputTokens(*h.maxIn)
+			}
+			if h.thinking != nil {
+				gp.SetThinkingEnabled(*h.thinking)
+			}
+		}
 	}
 	if h.effort != nil {
 		ins.inner.SetReasoningEffort(*h.effort)

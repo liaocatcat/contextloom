@@ -17,13 +17,20 @@ import (
 	"time"
 )
 
+// 事件类型常量（Event 字段取值；Entry 结构不变）。
+// EventThinkRound 思考轮事件（M11 度量）：多轮思考机制每登记一轮写入一条。
+// Detail 携带调用方序列化的 thinkmgr.ThinkRound JSON（round/kind/has_tools/
+// tool_n/body_len/reason）——trace 包不依赖 thinkmgr（避免依赖倒置），
+// detail 由调用方序列化为字符串传入。
+const EventThinkRound = "think_round"
+
 // Entry 单条 trace 记录（JSON 行）。
 type Entry struct {
 	TS      time.Time `json:"ts"`                // 记录时间
 	Session string    `json:"session,omitempty"` // 会话 ID（前 8 位）
 	Mode    string    `json:"mode,omitempty"`    // chat / task / goal
 	Round   int       `json:"round,omitempty"`   // agent 迭代轮次
-	Event   string    `json:"event"`             // agent_round / tool_call / goal_round / error
+	Event   string    `json:"event"`             // agent_round / tool_call / goal_round / think_round / error
 	Tool    string    `json:"tool,omitempty"`    // 工具名
 	Ms      int64     `json:"ms,omitempty"`      // 耗时毫秒
 	Tokens  int       `json:"tokens,omitempty"`  // token 估算（尽力而为）
@@ -125,6 +132,14 @@ func (r *Recorder) Record(e Entry) {
 	if sink != nil {
 		sink.Enqueue(e) // 同步调用；实现方（Exporter.Enqueue）非阻塞
 	}
+}
+
+// TraceThinkRound 记录一条思考轮事件（M11 便捷方法）：写 EventThinkRound，
+// Detail 由调用方序列化传入（thinkmgr.ThinkRound 的 JSON；trace 不 import
+// thinkmgr，避免依赖倒置）。失败静默，与 Record 语义一致；enabled=false 时
+// 零操作（零回归）。
+func (r *Recorder) TraceThinkRound(mode string, round int, detail string) {
+	r.Record(Entry{Event: EventThinkRound, Mode: mode, Round: round, Detail: detail})
 }
 
 // SetSink 注册导出目标（如 *Exporter；enabled 时才触发）。nil 取消导出。

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/contextloom/contextloom-agent/internal/checkpoint"
-	"github.com/contextloom/contextloom-agent/internal/ctxmgr"
 	"github.com/contextloom/contextloom-agent/internal/trace"
 	"github.com/contextloom/contextloom-agent/pkg/types"
 )
@@ -141,6 +140,18 @@ func (rt *Runtime) restoreFromCheckpoint(runID string) ([]types.Message, bool) {
 	if err != nil || cp.Done {
 		return nil, false // 无检查点或已正常完成 → 不恢复
 	}
+	// 会话隔离：检查点按 SessionID 归属校验。同项目多对话共用 run-main
+	// 文件——B 会话绝不恢复 A 会话（已停止/在途）的检查点上下文，
+	// 否则新对话被旧对话任务"接管"（跨会话串扰/复活根因）。
+	// SessionID 为空的旧检查点（历史数据）保持可恢复（向后兼容）。
+	if cp.SessionID != "" {
+		rt.historyMu.RLock()
+		cur := rt.currentSessionID
+		rt.historyMu.RUnlock()
+		if cur != "" && cp.SessionID != cur {
+			return nil, false
+		}
+	}
 	var msgs []types.Message
 	if err := json.Unmarshal(cp.Messages, &msgs); err != nil {
 		return nil, false
@@ -194,7 +205,7 @@ func (rt *Runtime) restoreFromCheckpoint(runID string) ([]types.Message, bool) {
 	// 同一套预算压缩兜底：恢复后总量仍必须回到红线内（与 AddToHistory/
 	// LoadSession 压缩策略一致），并把被压缩原文入检索索引（可被 AI 找回）
 	if rt.ctxBudget != nil && len(merged) > 0 {
-		compacted, changed := ctxmgr.CompactToBudgetWithEvict(merged, rt.ctxBudget, func(m types.Message) { rt.indexCompressedEvictedFor(sid, m) })
+		compacted, changed := rt.compactHistoryWithThinking(merged, sid)
 		if changed && compacted != nil {
 			merged = compacted
 			if sm := rt.ctxBudget.SummaryMessage(); sm != nil {

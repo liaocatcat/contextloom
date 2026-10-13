@@ -31,6 +31,34 @@ func NewBackend(backendName, endpoint, apiKey, modelID string, maxContext int, s
 	}
 }
 
+// ApplyGenerationParams 把可选的生成参数应用到后端（后端不支持时返回 false，不报错）。
+//
+// 设计动机：NewBackend 签名保持向后兼容（大量调用方与测试依赖），三项独立参数
+// （输出上限/输入预算/思考开关）在创建后按需下发；后端未实现
+// GenerationParamsBackend 时静默跳过并返回 false，调用方可据此决定是否提示。
+// 仅"显式设置"的项会被下发：maxOutputTokens>0、maxInputTokens>0、
+// thinkingEnabled!=nil；返回是否至少下发了一项。
+func ApplyGenerationParams(b Backend, maxOutputTokens, maxInputTokens int, thinkingEnabled *bool) bool {
+	gp, ok := b.(GenerationParamsBackend)
+	if !ok {
+		return false
+	}
+	applied := false
+	if maxOutputTokens > 0 {
+		gp.SetMaxOutputTokens(maxOutputTokens)
+		applied = true
+	}
+	if maxInputTokens > 0 {
+		gp.SetMaxInputTokens(maxInputTokens)
+		applied = true
+	}
+	if thinkingEnabled != nil {
+		gp.SetThinkingEnabled(*thinkingEnabled)
+		applied = true
+	}
+	return applied
+}
+
 // LocalBackendNames 本地/OpenAI 兼容后端名集合（api_key 可为空）。
 func LocalBackendNames() map[string]bool {
 	return map[string]bool{

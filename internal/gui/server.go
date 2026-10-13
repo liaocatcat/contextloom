@@ -212,6 +212,7 @@ func NewServer(rt Runtime, port int, token string) *Server {
 		pending: map[string]string{},
 	}
 	s.terms = newTermManager(s)
+	s.setupAutoCompactHook()
 	return s
 }
 
@@ -680,7 +681,22 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 		if streamCancel == nil {
 			streamCancel = func() {}
 		}
-		go s.streamChat(ctx, input, sid, p.SessionID, streamCancel)
+		// 流预注册（accepted 响应前完成）：消除"chat.stop 先于 streamChat
+		// 注册到达"的竞态——窗口内的 stop 直接命中条目（cancel+标记 stopped），
+		// streamChat 启动时检测并 interrupted 收尾，绝不放跑"注册晚于 stop"
+		// 的流（"已停止的对话被重新激活空跑"根因）。sid 此时必非空（上方已兜底
+		// NewSession）；同会话新流立即取消旧流（旧流可能尚未启动）。
+		s.mu.Lock()
+		s.activeGen++
+		uid := s.activeGen
+		a := &activeStream{cancel: streamCancel, gen: uid, uid: uid, sid: sid}
+		if old, ok := s.active[sid]; ok && old != a {
+			old.cancel()
+		}
+		s.active[sid] = a
+		s.active[uidKey(uid)] = a
+		s.mu.Unlock()
+		go s.streamChat(ctx, input, sid, p.SessionID, streamCancel, uid, a)
 		return map[string]any{"accepted": true}, nil
 	case "chat.stop":
 		var p struct {
@@ -700,6 +716,12 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 		if p.StreamID != 0 {
 			if a, ok := s.active[uidKey(p.StreamID)]; ok {
 				stopOne(a)
+			} else if p.SessionID != "" {
+				// streamId 过期（前端重置/竞态）时按会话兜底：用户意图=
+				// 停当前对话，不得因 streamId 未命中而静默丢弃停止请求
+				if a, ok := s.active[p.SessionID]; ok {
+					stopOne(a)
+				}
 			}
 		} else if p.SessionID != "" {
 			if a, ok := s.active[p.SessionID]; ok {
@@ -746,16 +768,28 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 		// #modelInfo——保证"设置面板保存 config.set 后状态栏模型信息同步更新"
 		// （refreshStatus 轮询自带模型信息，任何路径改设置都会自动同步）。
 		mi := s.rt.ModelInfo()
+		model := map[string]any{
+			"backend": mi["backend"],
+			"effort":  mi["effort"],
+			// 独立长度参数随状态栏轮询下发（前端可展示"输出 64k / 输入不限制"，
+			// 并在用户改设置后立即同步，不必重新拉 config.get）。
+			"maxOutputTokens": mi["maxOutputTokens"],
+			"maxInputTokens":  mi["maxInputTokens"],
+			"thinkingEnabled": mi["thinkingEnabled"],
+		}
+		// 多轮思考状态（设计 §3.8）：runtime 侧扩展 ModelInfo 的 thinking 字段
+		// {policy,round,maxRound,verify,verifying,source} 后自动透传；未落盘/
+		// 未启用时不带该键——前端字段缺失不渲染（零回归）。policy=off 由前端判定。
+		if th, ok := mi["thinking"]; ok && th != nil {
+			model["thinking"] = th
+		}
 		return map[string]any{
 			"mode":      s.rt.GetMode(),
 			"sessionId": s.rt.GetSessionID(),
 			"ctx":       formatCtxUsage(used, max),
 			"ctxRaw":    map[string]any{"used": used, "max": max},
 			"goal":      s.rt.GoalStatus(),
-			"model": map[string]any{
-				"backend": mi["backend"],
-				"effort":  mi["effort"],
-			},
+			"model":     model,
 		}, nil
 	case "paths":
 		return s.rt.PersistencePaths(), nil
@@ -1050,11 +1084,13 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 			return nil, fmt.Errorf("缺少 effort")
 		}
 		switch p.Effort {
-		case "low", "medium", "high", "xhigh", "max":
+		case "off", "low", "medium", "high", "xhigh", "max":
+			// off = 关闭思考（后端发 thinking:{type:disabled} 且不发 reasoning_effort，
+			// 对齐 DeepSeek Harness）：低成本任务不必再付思考 token 成本。
 			s.rt.SetEffort(p.Effort)
 			return map[string]any{"ok": true}, nil
 		default:
-			return nil, fmt.Errorf("无效 effort: %s", p.Effort)
+			return nil, fmt.Errorf("无效 effort: %s（可用: off/low/medium/high/xhigh/max）", p.Effort)
 		}
 	case "context.stats":
 		return map[string]any{
@@ -1069,24 +1105,28 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 		// 关键：压缩只改内存 conversationHistory，而 GUI 消息区显示的是
 		// 事件日志完整重放（GetDisplayHistory）——若不推送，用户点压缩后
 		// 界面"毫无变化"（"我的问题从来都是显示问题"根因）。
-		// 因此压缩成功后主动推送 ctx.compressed 事件（带压缩态消息列表），
-		// 前端收到后重绘消息区为 [历史摘要] + 保留消息，压缩立刻可见。
+		//
+		// ⚠️ 语义修正（问题 2：压缩后对话框历史显示变少）：压缩只作用于
+		// AI 上下文（conversationHistory），用户可见历史（事件日志）从不删减。
+		// 旧实现推送"压缩态消息列表"（messagesToJSONLight(GetConversationHistory)）
+		// 全量重绘消息区——界面立刻"变少"（只剩摘要+保留消息），与"切走再
+		// 切回才恢复"的观感完全一致（loadSession 走的是完整事件日志）。
+		// 现改为推送完整事件日志历史（messagesToJSON(GetDisplayHistory)）：
+		// 压缩前后用户可见历史不变，AI 上下文确实压缩（ctx 占比下降可见）。
+		// 自动压缩路径（AddToHistory 阈值触发）经 setupAutoCompactHook 广播
+		// 同构事件，压缩后无需"切走再切回"即自动恢复显示。
 		msg := s.rt.CompressContext()
 		sid := s.rt.GetSessionID()
 		// 无条件推送（sid 可能为空=尚未建会话）：前端按 sessionId 匹配
-		// 当前会话才重绘，其余场景仅刷新状态栏占比（resp 同步返回 usage）。
-		compacted := s.rt.GetConversationHistory()
-		// ⚠️ 事件帧防爆：messagesToJSON 会把保留消息的每张图片 dataURI
-		// （单张可达 MB 级）全量塞进 WS 帧 + 前端 renderMessages 全量建 <img>
-		// → 主线程卡死，状态栏轮询/点击全部无响应（"压缩后无反应+状态栏不刷"
-		// 真实根因之一）。压缩态重绘不需要真实图片——历史图片预览在
-		// 会话重载（chat.loadSession）时由 messagesToJSON 完整输出，压缩事件
-		// 只负责"让用户看到压缩后的消息结构"，因此这里用轻量行（图片降级为
-		// 计数文本，不携带 dataURI），帧体从 MB 级降到 KB 级。
+		// 当前会话才刷新，其余场景仅刷新状态栏占比（resp 同步返回 usage）。
+		// ⚠️ 事件帧仍走轻量版（messagesToJSONLight，图片降级计数文本）：
+		// 压缩事件只负责"通知 + 状态栏刷新"，前端收到后主动 chat.history
+		// 重拉完整历史（含图片预览）渲染——帧体保持 KB 级，绝不在广播帧里
+		// 携带 dataURI（MB 级帧 + 前端全量建 <img> 卡死主线程的历史根因）。
 		s.broadcast(Envelope{Type: "event", Event: "ctx.compressed", Data: map[string]any{
 			"sessionId": sid,
 			"message":   msg,
-			"messages":  s.messagesToJSONLight(compacted),
+			"messages":  s.messagesToJSONLight(s.rt.GetDisplayHistory(sid)),
 			"usage":     s.rt.ContextUsage(),
 		}})
 		return map[string]any{
@@ -1356,22 +1396,32 @@ func isIgnoredDir(name string) bool {
 // 子 Agent 活动信号（§ 前缀，来自 spawn_task 工具 EmitProgress）从主文本流中
 // 剥离，单独转发为 orchestration.progress 事件（GUI Agent 活动面板数据源），
 // 与 TUI 的 handleSubTaskSignal 路由逻辑同构。
-func (s *Server) streamChat(ctx context.Context, input, sid, streamID string, cancel context.CancelFunc) {
-	// 注册流式 cancel（覆盖同会话旧流；key 同时登记前端传的 streamID 与
-	// 真实 sid——chat.stop 按 sid 匹配、loadSession 按 a.sid 过滤）。
-	// uid 是本次流的全局唯一标识：随所有 agent.stream/done 事件下发，
-	// 前端据此精确判定事件归属（旧流的延迟事件不再误伤新流）。
+func (s *Server) streamChat(ctx context.Context, input, sid, streamID string, cancel context.CancelFunc, uid uint64, a *activeStream) {
+	// 补齐注册：streamID 键（前端传入的会话 ID，可能与真实 sid 不同）；
+	// sid/uidKey 已由 chat.send dispatch 预注册，这里断言回写（防被覆盖后失联）。
+	// gen 比较决定归属：本流已被更新的流取代（old.gen > a.gen）时不覆盖
+	// 注册、不误取消新流——由下方启动前停止检测（ctx 已取消）interrupted
+	// 收尾；本流是更新的流时取代并取消旧流。绝不双流并行。
 	s.mu.Lock()
-	if old, ok := s.active[streamID]; ok {
-		old.cancel()
+	claim := func(key string) {
+		if key == "" {
+			return
+		}
+		old, ok := s.active[key]
+		if !ok {
+			s.active[key] = a
+			return
+		}
+		if old == a {
+			return
+		}
+		if old.gen < a.gen {
+			old.cancel() // 本流是更新的流：取代旧流
+			s.active[key] = a
+		}
 	}
-	s.activeGen++
-	uid := s.activeGen
-	a := &activeStream{cancel: cancel, gen: uid, uid: uid, sid: sid}
-	s.active[streamID] = a
-	if sid != "" && sid != streamID {
-		s.active[sid] = a
-	}
+	claim(streamID)
+	claim(sid)
 	// 独立 uid 键：仅用于本流存活判定（streamStillCurrent），避免
 	// streamID 为空串时多会话互相覆盖导致误判。
 	s.active[uidKey(uid)] = a
@@ -1395,6 +1445,17 @@ func (s *Server) streamChat(ctx context.Context, input, sid, streamID string, ca
 		s.mu.Unlock()
 		s.clearPending(sid)
 	}()
+
+	// 启动前已停止（预注册条目被 chat.stop 命中）或 ctx 已取消（被同会话
+	// 新流取代）：interrupted 收尾，不启动模型——迟到的注册绝不放跑已停流
+	// （"已停止的对话被重新激活空跑"的最后一道闸）。
+	s.mu.Lock()
+	stoppedEarly := a.stopped
+	s.mu.Unlock()
+	if stoppedEarly || ctx.Err() != nil {
+		s.broadcast(Envelope{Type: "event", Event: "agent.done", Data: map[string]any{"interrupted": true, "sessionId": sid, "streamId": uid}})
+		return
+	}
 
 	// goal 模式：持久目标循环（v2 自进化：反思→缺陷返工→收敛→打磨全链路）。
 	// 每轮结束监工评估 + 状态机推进；未完成自动发起下一轮（continuation 驱动），
@@ -1482,7 +1543,14 @@ func (s *Server) runAgentRound(ctx context.Context, input, sid, streamID string,
 		s.broadcast(Envelope{Type: "event", Event: "agent.stream", Data: map[string]any{"delta": delta, "sessionId": sid, "streamId": uid}})
 	}
 	emitDone := func(extra map[string]any) {
-		if !s.streamStillCurrent(streamID, uid) {
+		interrupted, _ := extra["interrupted"].(bool)
+		// interrupted 收尾必须送达：被 chat.stop 停止/被同会话新流取代的流，
+		// 其 interrupted done 是前端解锁该会话的唯一信号——一旦被抑制，
+		// 前端永远 streaming（"无法停止/停下的对话复活空跑"的收尾保证）。
+		// 事件带 streamId，前端按归属过滤，不会打断新流。
+		// 非 interrupted 的完成/错误 done 仍按活跃流判定抑制（防旧流残留
+		// 事件误伤新流）。
+		if !interrupted && !s.streamStillCurrent(streamID, uid) {
 			return
 		}
 		data := map[string]any{"sessionId": sid, "streamId": uid}
@@ -1557,6 +1625,17 @@ loop:
 		}
 	}
 	// 等待 errCh 关闭后收尾（下方 select 带 default 非阻塞，无挂起风险）
+	// 先确定性检查取消：select 在"ctx 已取消"与"errCh 已关闭"同时就绪时
+	// 随机选择，可能把已取消的空流判为正常完成（done(nil) 丢 interrupted
+	// 标记）——取消必须恒以 interrupted 收尾，否则前端永远 streaming。
+	if ctx.Err() != nil {
+		if full.Len() > 0 {
+			s.rt.AddToHistoryForSession(sid, "assistant", full.String())
+		}
+		s.pushCtxUsage(0)
+		emitDone(map[string]any{"interrupted": true})
+		return "", true
+	}
 	select {
 	case <-ctx.Done():
 		// 中断：必须发 agent.done（历史 bug：主循环因 ch 关闭 break 后，
@@ -1902,6 +1981,35 @@ func randomToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// setupAutoCompactHook 注入"自动压缩广播"回调（问题 2 根治）：
+// AddToHistory 阈值触发自动压缩成功后，runtime 回调本方法——广播
+// ctx.compressed 事件（sessionId + 完整事件日志历史 messagesToJSON）。
+// 前端收到后自动重新加载会话历史刷新消息区，压缩不再需要"切走再切回"
+// 才恢复显示。回调在独立 goroutine 执行：压缩路径绝不因 WS 广播慢而阻塞
+// （broadcast 持 writeMu，慢客户端下可达秒级）。sid 为空（未建会话）跳过。
+// 多次回调天然幂等：每次都重拉完整历史覆盖渲染，无状态叠加。
+func (s *Server) setupAutoCompactHook() {
+	if rc, ok := s.rt.(interface{ SetOnAutoCompact(func(sid string)) }); ok {
+		rc.SetOnAutoCompact(func(sid string) {
+			if sid == "" {
+				return
+			}
+			go func() {
+				// 轻量帧（messagesToJSONLight）：广播帧只做"通知"，前端收到后
+				// 主动 chat.history 重拉完整历史（含图片预览）渲染——绝不携带
+				// dataURI（与手动压缩路径同约束，防 MB 级帧卡死主线程）。
+				s.broadcast(Envelope{Type: "event", Event: "ctx.compressed", Data: map[string]any{
+					"sessionId": sid,
+					"message":   "上下文达到阈值，已自动压缩（AI 上下文保留摘要+近况，完整历史仍在下方）",
+					"messages":  s.messagesToJSONLight(s.rt.GetDisplayHistory(sid)),
+					"usage":     s.rt.ContextUsage(),
+					"auto":      true,
+				}})
+			}()
+		})
+	}
 }
 
 func indexFallbackHTML(port int, token string) string {

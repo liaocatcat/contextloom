@@ -39,6 +39,14 @@ type Message struct {
 	Name             string     `json:"name,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+
+	// ReasoningProtected 压缩保护标记（M10 思考保护；打标入口 ctxmgr.MarkProtected）：
+	// 为 true 时上下文压缩不把本消息的 ReasoningContent 选为截断/折半目标
+	// （正文仍可削）。json:"-" 保证不参与序列化——API 请求体（messages 在
+	// model 层被直接 marshal，用 omitempty 会把 "protected":true 发给上游）、
+	// 事件日志、检查点逐字节零影响；零值 false = 现行为。标记为请求内瞬态：
+	// 不随持久化往返，需要时由调用方在压缩前重新打标。
+	ReasoningProtected bool `json:"-"`
 }
 
 // ContentPart 是多模态消息的一个内容片段。

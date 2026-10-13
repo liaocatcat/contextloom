@@ -40,10 +40,26 @@ type DeepSeekBackend struct {
 	// 客户端不主动截断输出预算。
 	client          *http.Client
 	reasoningEffort string // 推理强度，以 OpenAI 兼容字段 reasoning_effort 发送（DeepSeek 若严格校验未知字段需实测调整）
+	nextEffort      string // 轮次临时层（M7）：仅下一次请求生效的 effort 覆盖（""=无）；genMu 保护；消费后自动复位
 	sendEffort      bool   // 是否发送 reasoning_effort（deepseek=true；openai 兼容通道=false，避免本地模型拒绝未知字段）
 	streamTools     []types.ToolDefinition
 	topP            *float64 // 核采样（nil=不发送，使用 API 默认值）
 	temperature     *float64 // 温度（nil=不发送，使用 API 默认值）
+
+	// ── 独立生成参数（GenerationParamsBackend，对齐 DeepSeek Harness 三项独立参数）──
+	// genMu 保护以下字段（与 modelMu 分工：modelMu 管模型标识/端点/上下文窗口等）。
+	genMu sync.Mutex
+	// maxOutputTokens 独立输出上限（<=0=未设置：回退 maxContext，保持历史语义）。
+	// 设置后 max_tokens 不再随上下文窗口膨胀——"思考长度/输出长度"可独立配置。
+	maxOutputTokens int
+	// maxInputTokens 独立输入预算（<=0=未设置：回退 maxContext），作为发送前
+	// 兜底压缩的触发阈值——用户可单独收紧输入长度而不影响输出预算。
+	maxInputTokens int
+	// thinkingEnabled 思考开关（nil=不显式发送 thinking 字段，保持历史行为；
+	// 非 nil 时发 thinking:{type:"enabled"|"disabled"}，disabled 时不再发
+	// reasoning_effort，对齐 dsh"思考关闭时只允许 off"）。
+	thinkingEnabled *bool
+
 	// supportsVision 是否支持 image_url 多模态输入。DeepSeek 官方 API 当前
 	// 为纯文本模型（服务端 content 枚举只接受 text，发 image_url 直接 400），
 	// 默认 false；仅当用户显式配置 model.supports_vision=true（如自建
@@ -51,14 +67,22 @@ type DeepSeekBackend struct {
 	supportsVision bool
 }
 
-// 输出长度不限制：max_tokens 取 maxContext，按 DeepSeek 官方上限 384K 兜顶。
-// 不设人为小上限（服务端默认 4096 才截断），用满上下文窗口作为输出预算。
+// 输出预算三级优先级：独立输出上限（maxOutputTokens，用户显式设置）> maxContext。
+// 未设置独立上限时保持历史行为：max_tokens 取 maxContext（用户配 1M 就发 1M），
+// 不设人为小上限（服务端默认 4096 才截断），用满上下文窗口作为输出预算；
+// 服务端按自身上限拒绝时由 400 自修复钳制重发。
 
 // deepseekEffortRemap 把用户级思考深度档位映射到 API 层 reasoning_effort。
 // V4.1 起 DeepSeek 原生支持 low(50)/medium/high/xhigh/max 多档；
 // 此前 low 被收编到 high（三级都打 high，低档名存实亡、浪费低成本机会），
 // 现按 V4.1 能力解锁低档：low 透传 low（50），medium/high 仍归一 high，
 // xhigh/max 归一 max——UI 三档（low/medium/high）各归其位、名副其实。
+//
+// off 档语义（对齐 DeepSeek Harness，本表不含 off）：off=不思考——
+// SetReasoningEffort("off") 会把 thinkingEnabled 置为 false，请求体发
+// thinking:{type:"disabled"} 且【不发】reasoning_effort；其余档位
+// （low/medium/high/xhigh/max）=思考并控制强度。off 不是合法的
+// reasoning_effort 值，只作为"关闭思考"的档位名存在。
 var deepseekEffortRemap = map[string]string{
 	"low":    "low",
 	"medium": "high",
@@ -67,17 +91,44 @@ var deepseekEffortRemap = map[string]string{
 	"max":    "max",
 }
 
-// maxTokens 计算单次模型输出上限：取 maxContext，不设人为上限。
-// 用户配多大上下文（如 1M）就发多大 max_tokens——服务端若按其自身上限
-// （DeepSeek 官方 max_tokens 上限 384K/393216）拒绝，400 自修复路径会
-// 自动钳制到官方上限后重发一次（见 Chat/StreamEx 400 处理分支），
+// maxTokens 计算单次模型输出上限（三级优先级的落地）：
+//   - maxOutputTokens>0（用户显式设置独立输出上限）时优先返回它；
+//   - 否则回退 maxContext（保持历史行为：用户配多大上下文就发多大 max_tokens，
+//     不设人为上限）；
+//   - 下限 1（API 规范要求 ≥1）。
+//
+// 服务端若按其自身上限（DeepSeek 官方 max_tokens 上限 384K/393216）拒绝，
+// 400 自修复路径仍会钳制到合法上限后重发一次（见 Chat/StreamEx 400 处理分支），
 // 客户端不主动截断，把"什么上限"的裁决交给服务端。
 func (d *DeepSeekBackend) maxTokens() int {
+	d.genMu.Lock()
+	out := d.maxOutputTokens
+	d.genMu.Unlock()
+	if out > 0 {
+		return out
+	}
+	d.modelMu.Lock()
 	limit := d.maxContext
+	d.modelMu.Unlock()
 	if limit < 1 {
 		limit = 1
 	}
 	return limit
+}
+
+// inputLimit 计算输入预算（发送前兜底压缩的触发阈值）：
+// maxInputTokens>0（用户显式设置独立输入上限）时返回它；否则返回 maxContext
+// （保持历史行为）；maxContext 也 <=0 时返回原值，调用方以 >0 判定是否启用压缩。
+func (d *DeepSeekBackend) inputLimit() int {
+	d.genMu.Lock()
+	in := d.maxInputTokens
+	d.genMu.Unlock()
+	if in > 0 {
+		return in
+	}
+	d.modelMu.Lock()
+	defer d.modelMu.Unlock()
+	return d.maxContext
 }
 
 // maxTokensCapLadder 已知服务端 max_tokens 上限阶梯（从大到小）。
@@ -185,9 +236,11 @@ func (d *DeepSeekBackend) Chat(ctx context.Context, messages []types.Message, to
 	if !d.SupportsVision() {
 		messages = stripImagesForTextModel(messages)
 	}
-	// 发送前兜底②：超过安全红线时按预算压缩，从源头避免 400 上下文超限
-	if d.maxContext > 0 && ctxmgr.NewTokenBudget(d.maxContext).SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
-		if compacted, _ := ctxmgr.CompactToBudget(messages, ctxmgr.NewTokenBudget(d.maxContext)); compacted != nil {
+	// 发送前兜底②：超过安全红线时按预算压缩，从源头避免 400 上下文超限。
+	// 预算取 inputLimit()（独立输入上限优先，未设置时回退 maxContext）——
+	// 用户可单独收紧输入长度而不影响输出预算。
+	if lim := d.inputLimit(); lim > 0 && ctxmgr.NewTokenBudget(lim).SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
+		if compacted, _ := ctxmgr.CompactToBudget(messages, ctxmgr.NewTokenBudget(lim)); compacted != nil {
 			messages = compacted
 		}
 	}
@@ -205,9 +258,8 @@ func (d *DeepSeekBackend) Chat(ctx context.Context, messages []types.Message, to
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
-	if d.sendEffort && d.reasoningEffort != "" {
-		body["reasoning_effort"] = d.reasoningEffort
-	}
+	// thinking 开关与 reasoning_effort 按 dsh 规则发送（见 applyThinkingParams）
+	d.applyThinkingParams(body)
 	data, _ := json.Marshal(body)
 
 	// 流式请求重试（借鉴业界主流桌面编码 Agent 的重试策略：超时/网络错误重试，400 不重试）
@@ -337,9 +389,9 @@ func (d *DeepSeekBackend) StreamEx(ctx context.Context, messages []types.Message
 	if !d.SupportsVision() {
 		messages = stripImagesForTextModel(messages)
 	}
-	// 发送前兜底②：超过安全红线时按预算压缩
-	if d.maxContext > 0 && ctxmgr.NewTokenBudget(d.maxContext).SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
-		if compacted, _ := ctxmgr.CompactToBudget(messages, ctxmgr.NewTokenBudget(d.maxContext)); compacted != nil {
+	// 发送前兜底②：超过安全红线时按预算压缩（预算取 inputLimit()，语义同 Chat）
+	if lim := d.inputLimit(); lim > 0 && ctxmgr.NewTokenBudget(lim).SafetyExceeded(ctxmgr.MessagesTokens(messages)) {
+		if compacted, _ := ctxmgr.CompactToBudget(messages, ctxmgr.NewTokenBudget(lim)); compacted != nil {
 			messages = compacted
 		}
 	}
@@ -360,9 +412,8 @@ func (d *DeepSeekBackend) StreamEx(ctx context.Context, messages []types.Message
 	if len(d.streamTools) > 0 {
 		body["tools"] = d.streamTools
 	}
-	if d.sendEffort && d.reasoningEffort != "" {
-		body["reasoning_effort"] = d.reasoningEffort
-	}
+	// thinking 开关与 reasoning_effort 按 dsh 规则发送（与 Chat 同源，保证两条路径一致）
+	d.applyThinkingParams(body)
 	data, _ := json.Marshal(body)
 
 	go func() {
@@ -820,7 +871,10 @@ func (d *DeepSeekBackend) ModelID() string {
 	return d.currentModel()
 }
 
+// MaxContext 加锁读取上下文窗口上限（SetMaxContext 并发热更新安全）。
 func (d *DeepSeekBackend) MaxContext() int {
+	d.modelMu.Lock()
+	defer d.modelMu.Unlock()
 	return d.maxContext
 }
 
@@ -898,16 +952,183 @@ func (d *DeepSeekBackend) SetStreamTools(tools []types.ToolDefinition) {
 	d.streamTools = tools
 }
 
+// SetReasoningEffort 设置思考深度档位（UI 级 → API 层 reasoning_effort）。
+//
+// "off" 档特殊语义（对齐 DeepSeek Harness）：视为"关闭思考"——置
+// thinkingEnabled=false，请求体发 thinking:{type:"disabled"} 且不发
+// reasoning_effort；reasoningEffort 字段保留 "off" 字符串供 UI 回显。
+// 其余档位（low/medium/high/xhigh/max）=思考并控制强度，不改变 thinking
+// 字段的显式状态（nil 时维持历史"只发 reasoning_effort"行为）。
 func (d *DeepSeekBackend) SetReasoningEffort(level string) {
-	if remapped, ok := deepseekEffortRemap[level]; ok {
-		d.reasoningEffort = remapped
-	} else {
-		d.reasoningEffort = level
+	if level == "off" {
+		off := false
+		d.genMu.Lock()
+		d.reasoningEffort = "off" // 保留字符串供 UI 回显（请求体不再发该字段）
+		d.thinkingEnabled = &off
+		d.genMu.Unlock()
+		return
 	}
+	remapped, ok := deepseekEffortRemap[level]
+	if !ok {
+		remapped = level
+	}
+	d.genMu.Lock()
+	d.reasoningEffort = remapped
+	// 从 off 档切回思考档位时恢复"未显式设置"状态（nil）：否则 thinkingEnabled
+	// 会永久卡在 false，切回 max 也不思考——档位名存实亡。
+	// 配置路径的显式关闭（thinking_enabled=false）不受影响：runtime 统一下发时
+	// 会先设档位、再 SetThinkingEnabled(false) 覆盖，顺序上配置始终胜出。
+	if d.thinkingEnabled != nil && !*d.thinkingEnabled {
+		d.thinkingEnabled = nil
+	}
+	d.genMu.Unlock()
 }
 
+// ReasoningEffort 加锁返回当前思考深度档位（"off" 原样返回供 UI 回显）。
 func (d *DeepSeekBackend) ReasoningEffort() string {
+	d.genMu.Lock()
+	defer d.genMu.Unlock()
 	return d.reasoningEffort
+}
+
+// SetNextEffort 设置轮次临时层档位（M7）：仅覆盖下一次请求的 effort，发送后自动
+// 复位（一次性语义），不写回全局档位（reasoningEffort）、不持久化——与
+// SetReasoningEffort（settings 持久化语义）正交。仅用于"升档"（low/medium/high/
+// xhigh/max；由 runtime 在 verify/refine 轮下发），"off" 档不通过本方法处理
+// （off=关闭思考，语义见 SetReasoningEffort）。空值写入等同清除临时层，与不调用
+// 语义等同。
+func (d *DeepSeekBackend) SetNextEffort(level string) {
+	d.genMu.Lock()
+	d.nextEffort = level
+	d.genMu.Unlock()
+}
+
+// currentEffort 解析本轮实际档位（请求构造用）：临时层 > 全局档位。
+// 零回归：临时层为空（""）时返回全局 reasoningEffort，与改造前的读取逐字一致。
+func (d *DeepSeekBackend) currentEffort() string {
+	d.genMu.Lock()
+	defer d.genMu.Unlock()
+	if d.nextEffort != "" {
+		return d.nextEffort
+	}
+	return d.reasoningEffort
+}
+
+// clearNextEffort 复位轮次临时层（一次性语义：请求体构造完成后调用）。
+// 调用约定为"每轮请求前设置一次"；与在途请求并发设置不属于支持场景。
+func (d *DeepSeekBackend) clearNextEffort() {
+	d.genMu.Lock()
+	d.nextEffort = ""
+	d.genMu.Unlock()
+}
+
+// ── 独立生成参数（GenerationParamsBackend 实现：输出/输入上限 + 思考开关）──
+
+// SetMaxOutputTokens 设置独立输出上限（n<=0 表示未设置，回退 maxContext）。
+func (d *DeepSeekBackend) SetMaxOutputTokens(n int) {
+	d.genMu.Lock()
+	d.maxOutputTokens = n
+	d.genMu.Unlock()
+}
+
+// MaxOutputTokens 返回独立输出上限（<=0=未设置）。
+func (d *DeepSeekBackend) MaxOutputTokens() int {
+	d.genMu.Lock()
+	defer d.genMu.Unlock()
+	return d.maxOutputTokens
+}
+
+// SetMaxInputTokens 设置独立输入预算（n<=0 表示未设置，回退 maxContext）。
+func (d *DeepSeekBackend) SetMaxInputTokens(n int) {
+	d.genMu.Lock()
+	d.maxInputTokens = n
+	d.genMu.Unlock()
+}
+
+// MaxInputTokens 返回独立输入预算（<=0=未设置）。
+func (d *DeepSeekBackend) MaxInputTokens() int {
+	d.genMu.Lock()
+	defer d.genMu.Unlock()
+	return d.maxInputTokens
+}
+
+// SetThinkingEnabled 设置思考开关（true=发 thinking:{type:"enabled"}；
+// false=发 thinking:{type:"disabled"} 且不发 reasoning_effort）。
+func (d *DeepSeekBackend) SetThinkingEnabled(on bool) {
+	v := on
+	d.genMu.Lock()
+	d.thinkingEnabled = &v
+	d.genMu.Unlock()
+}
+
+// ThinkingEnabled 报告思考开关；未显式设置（nil）返回 false
+// （nil 的语义是"不显式发送 thinking 字段"，不等于"思考开启"）。
+func (d *DeepSeekBackend) ThinkingEnabled() bool {
+	d.genMu.Lock()
+	defer d.genMu.Unlock()
+	return d.thinkingEnabled != nil && *d.thinkingEnabled
+}
+
+// thinkingState 加锁返回思考开关快照（nil=未显式设置）。
+func (d *DeepSeekBackend) thinkingState() *bool {
+	d.genMu.Lock()
+	defer d.genMu.Unlock()
+	if d.thinkingEnabled == nil {
+		return nil
+	}
+	v := *d.thinkingEnabled
+	return &v
+}
+
+// shouldSendEffort 加锁读取 reasoning_effort/thinking 发送开关。
+func (d *DeepSeekBackend) shouldSendEffort() bool {
+	d.modelMu.Lock()
+	defer d.modelMu.Unlock()
+	return d.sendEffort
+}
+
+// applyThinkingParams 把思考开关与推理强度写入请求体（Chat 与 StreamEx 共用，
+// 保证两条路径行为一致）。发送规则（对齐 DeepSeek Harness，保证零回归）：
+//  1. sendEffort==false（OpenAI 兼容通道）：两个字段都不发——本地/第三方
+//     服务常严格校验未知字段直接 400；
+//  2. thinkingEnabled==nil（未显式设置）：保持历史行为——只发 reasoning_effort，
+//     不发 thinking（既有测试与线上行为逐字不变）；
+//  3. thinkingEnabled==true：发 thinking:{type:"enabled"}，并照常发 reasoning_effort；
+//  4. thinkingEnabled==false：发 thinking:{type:"disabled"}，且【不发】reasoning_effort
+//     ——对齐 dsh：思考关闭时只允许 off，禁止 thinking:disabled + reasoning_effort
+//     的自相矛盾组合。
+//
+// 另：off 不是合法的 reasoning_effort 值（dsh：off=不思考，该字段只承载强度），
+// 任何情况下都不发送。
+//
+// 轮次临时层（M7）：effort 取值可被 SetNextEffort 一次性覆盖（验证轮升档），
+// 但不改变上述四条发送规则；覆盖单请求自过期（实现见函数内注释）。
+func (d *DeepSeekBackend) applyThinkingParams(body map[string]any) {
+	// 轮次临时层（M7）：effort 取值优先读临时档位（验证轮升档）；临时层一次性——
+	// 无论最终是否写入请求体（sendEffort=false / 思考已关闭 / off 档等分支），
+	// 请求体构造完成后即复位，不泄漏到下一请求。零回归：临时层为空时读取全局
+	// reasoningEffort，与改造前同值同锁、逐字一致。
+	effort := d.currentEffort()
+	defer d.clearNextEffort()
+	if !d.shouldSendEffort() {
+		return
+	}
+	sendEffort := effort != "" && effort != "off"
+	te := d.thinkingState()
+	if te == nil {
+		if sendEffort {
+			body["reasoning_effort"] = effort
+		}
+		return
+	}
+	if *te {
+		body["thinking"] = map[string]any{"type": "enabled"}
+		if sendEffort {
+			body["reasoning_effort"] = effort
+		}
+		return
+	}
+	body["thinking"] = map[string]any{"type": "disabled"}
 }
 
 func (d *DeepSeekBackend) SetTopP(p float64) {

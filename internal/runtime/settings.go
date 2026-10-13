@@ -33,6 +33,11 @@ func (rt *Runtime) saveSettings() {
 		// 重启后 loadSettings 恢复，避免"切换不持久化"（此前缺失导致 /model 无效）。
 		"active_model": rt.Config.ActiveModelName,
 	}
+	// 多轮思考会话覆盖（M2/M12）：仅当存在覆盖时写入 thinking_session 键；
+	// 无覆盖（默认 off）→ 不写键，保存行为与旧版一致（零回归）。
+	if ts := rt.thinkingSessionSettings(); ts != nil {
+		settings["thinking_session"] = ts
+	}
 	data, _ := json.MarshalIndent(settings, "", "  ")
 	os.WriteFile(filepath.Join(dir, "settings.json"), data, 0644)
 }
@@ -94,6 +99,16 @@ func (rt *Runtime) loadSettings() {
 	if am, ok := s["active_model"].(string); ok && am != "" {
 		if rt.findModelPreset(am) != nil {
 			rt.Config.ActiveModelName = am
+		}
+	}
+	// 恢复会话级思考策略覆盖（M2/M12）：无 thinking_session 键 → 无覆盖、行为与旧版
+	// 一致（零回归）；非法值经 Set* 校验静默拒绝，不阻断设置加载。
+	if ts, ok := s["thinking_session"].(map[string]any); ok {
+		if p, ok := ts["policy"].(string); ok && p != "" {
+			_ = rt.SetThinkingPolicy(p)
+		}
+		if v, ok := ts["verify_pass"].(string); ok && v != "" {
+			_ = rt.SetVerifyPass(v)
 		}
 	}
 }
