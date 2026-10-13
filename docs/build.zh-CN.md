@@ -7,6 +7,8 @@
 > [toolchain.md](toolchain.md)（员工/场景/工具链/门禁）。
 > 英文版：[build.md](build.md)。
 
+> 💡 **Shell 语法提示**：本页其余命令默认为 **bash** 语法（`VAR=x cmd` 变量前缀 + 反斜杠续行）。Windows 原生用户有两种选择：① 在 WSL / MSYS2 / Git Bash 中照抄 bash 版本；② 使用下文 §2.1 / §2.2 / §3.2 给出的 **PowerShell / CMD 等价命令**（变量前置写法已改为 `$env:` 赋值 / `set`，不使用续行符）。
+
 ## 0. 速览
 
 ```bash
@@ -98,6 +100,29 @@ CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/contex
 CGO_ENABLED=0 GOOS=windows GOARCH=386   go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe   ./cmd/contextloom
 ```
 
+**Windows 本机 —— PowerShell / CMD**（bash 的 `VAR=x cmd` 前缀语法在 PowerShell/CMD 中不可用，须改为 `$env:` 赋值 / `set`）：
+
+```powershell
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
+
+$env:GOOS="windows"; $env:GOARCH="arm64"
+go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe ./cmd/contextloom
+
+$env:GOOS="windows"; $env:GOARCH="386"
+go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe ./cmd/contextloom
+
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED   # 清理，避免污染后续构建
+```
+
+```cmd
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe .\cmd\contextloom
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=arm64&& go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe .\cmd\contextloom
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=386&& go build -ldflags="-s -w" -o dist/contextloom-windows-386.exe .\cmd\contextloom
+```
+
+> ⚠️ **CMD 的 `set X=Y&&` 等号后不要留尾随空格**：CMD 会把空格并入变量值（`GOOS=windows ` 这种带尾空格的值会导致 Go 报 `unknown GOOS`）。上例故意写成 `set GOOS=windows&&`（`&&` 紧贴值），且**不要**在 `set` 行末手动补空格。
+
 > ⚠️ **TUI 的 Windows 构建不要加 `-H windowsgui`。** TUI 是**控制台**程序。`-H windowsgui` 会把 PE 切到 GUI 子系统（Subsystem=2），从而脱离控制台、破坏全部终端输入输出。只有 GUI 二进制才用该标志（§3.2）。
 
 **BSD 家族**
@@ -152,6 +177,41 @@ for t in "${targets[@]}"; do
     go build -ldflags="-s -w" -o "$out" ./cmd/contextloom
 done
 echo "✅ TUI 构建完成。"
+```
+
+**PowerShell 等价循环**（Windows 本机用户；逻辑与上方 bash 版一致，Windows 目标自动补 `.exe`）：
+
+```powershell
+# build-all-tui.ps1 —— 把 TUI 构建到 dist/ 下所有受支持目标
+New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+$targets = @(
+  "darwin/amd64",  "darwin/arm64",
+  "linux/amd64",   "linux/arm64",  "linux/386",
+  "linux/arm/5",   "linux/arm/6",  "linux/arm/7",
+  "linux/ppc64le", "linux/s390x",  "linux/riscv64", "linux/loong64",
+  "linux/mips64le","linux/mipsle",
+  "windows/amd64", "windows/arm64","windows/386",
+  "freebsd/amd64", "freebsd/arm64",
+  "netbsd/amd64",  "openbsd/amd64","dragonfly/amd64",
+  "solaris/amd64", "aix/ppc64",    "plan9/amd64"
+)
+
+foreach ($t in $targets) {
+  $p = $t -split '/'
+  $os = $p[0]; $arch = $p[1]
+  $arm = if ($p.Count -gt 2) { $p[2] } else { $null }
+  $out = "dist/contextloom-$os-$arch"
+  if ($arm) { $out = "dist/contextloom-$os-armv$arm" }
+  if ($os -eq "windows") { $out = "$out.exe" }
+
+  Write-Host "==> $os/$arch$(if ($arm) { "/GOARM=$arm" }) -> $out"
+  $env:CGO_ENABLED = "0"; $env:GOOS = $os; $env:GOARCH = $arch
+  if ($arm) { $env:GOARM = $arm } else { Remove-Item Env:GOARM -ErrorAction SilentlyContinue }
+  go build -ldflags="-s -w" -o $out ./cmd/contextloom
+}
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED -ErrorAction SilentlyContinue
+Write-Host "✅ TUI 构建完成。"
 ```
 
 ### 2.3 Makefile 封装
@@ -228,6 +288,31 @@ CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
 
 # Makefile 捷径（交叉编译 amd64 + PE 校验）：
 make build-gui-win
+```
+
+**Windows 本机 —— PowerShell / CMD**（上述 bash 的 `VAR=x` 前缀与反斜杠续行在 PowerShell/CMD 中不可用；`-H windowsgui` 必带，含义见下方 ⚠️）：
+
+PowerShell（推荐单行，避免反引号续行符在复制粘贴中出错的坑）：
+
+```powershell
+$env:CGO_ENABLED="1"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -tags production -ldflags="-s -w -H windowsgui" -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED   # 清理，避免污染后续构建
+```
+
+多行续行写法（PowerShell 用反引号 `` ` ``）：
+
+```powershell
+$env:CGO_ENABLED="1"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -tags production -ldflags="-s -w -H windowsgui" `
+  -o dist/contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+```
+
+CMD（单行；`set X=Y&&` 等号后不留尾随空格，否则空格会进入变量值）：
+
+```cmd
+set CGO_ENABLED=1&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o dist\contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
 ```
 
 > ⚠️ **`-H windowsgui` 是生死标志。** Windows GUI 构建漏掉它会产出 console 子系统 exe（PE `Subsystem=3`），双击必弹黑色命令行窗口。该标志由 Go **链接器按目标 `GOOS=windows` 生效**，与构建主机无关——因此从 Linux/macOS 交叉编译时，与在 Windows 本机构建同样必须带。

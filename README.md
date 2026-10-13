@@ -153,6 +153,9 @@ CGO_ENABLED=0 GOOS=linux   GOARCH=arm   GOARM=7 go build -ldflags="-s -w" -o dis
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-windows-amd64.exe ./cmd/contextloom
 CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/contextloom-windows-arm64.exe ./cmd/contextloom
 
+# Windows native (PowerShell/CMD): the bash env prefixes above do not work as-is —
+# use `$env:` assignment syntax instead, see docs/build.md §2.1 ("Windows native — PowerShell / CMD").
+
 # FreeBSD
 CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o dist/contextloom-freebsd-amd64 ./cmd/contextloom
 ```
@@ -206,6 +209,23 @@ CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 \
   go build -tags production -ldflags="-s -w -H windowsgui" \
   -o contextloom-gui-windows-arm64.exe ./cmd/contextloom-gui
 ```
+
+<details>
+<summary><strong>Windows native (PowerShell)</strong> — equivalent command for amd64</summary>
+
+The bash commands above use POSIX env prefixes (`VAR=value cmd`), which PowerShell cannot run
+as-is. PowerShell equivalent (single line, `$env:` assignment — **do not** use
+`VAR=value go build`):
+
+```powershell
+$env:CGO_ENABLED="1"; $env:CC="x86_64-w64-mingw32-gcc"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe ./cmd/contextloom-gui
+Remove-Item Env:GOOS, Env:GOARCH, Env:CC, Env:CGO_ENABLED
+```
+
+The full matrix (arm64, CMD variants, batch loop) is in [docs/build.md §2.1 / §2.2 / §3.2](docs/build.md#21-full-cross-compile-matrix).
+
+</details>
 
 > ⚠️ **`-H windowsgui` is a make-or-break flag**: omitting it from a Windows GUI build produces a console-subsystem exe (Subsystem=3) that always pops up a black command-line window on double-click. The flag takes effect based on the **target GOOS=windows**, independent of the build host — cross-compiling from Linux/macOS requires it just the same.
 >
