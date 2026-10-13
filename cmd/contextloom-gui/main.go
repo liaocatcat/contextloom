@@ -134,10 +134,18 @@ func findContextLoomBin() (string, error) {
 			return v, nil
 		}
 	}
-	// 3. PATH
+	// 3. PATH：先精确名，再带平台后缀的产物名（如 contextloom-linux-amd64）
 	for _, name := range []string{"contextloom", "contextloom.exe"} {
 		if p, err := exec.LookPath(name); err == nil {
 			return p, nil
+		}
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			continue
+		}
+		if bin, ok := findContextLoomPlatformBinInDir(dir); ok {
+			return bin, nil
 		}
 	}
 	return "", fmt.Errorf("未找到 contextloom 主程序（请在 contextloom-gui 同目录放置 contextloom，或设置 CONTEXTLOOM_BIN）")
@@ -200,14 +208,96 @@ func guiConfigPathFromExe(exe string) string {
 
 // findContextLoomInDir 在指定目录查找 contextloom 主程序（同目录部署场景）。
 // 独立纯函数便于单测（findContextLoomBin 内部依赖 os.Executable 无法注入）。
+//
+// 名称匹配规则：
+//  1. 精确名优先：contextloom（unix）/ contextloom.exe（Windows）
+//  2. 兼容交叉编译产物名：contextloom-<GOOS>-<GOARCH>[.exe]，如
+//     contextloom-linux-amd64、contextloom-windows-arm64.exe、contextloom-darwin-arm64。
+//     依据：Makefile/文档的跨平台打包命令产出此类名称，用户把 TUI 产物放到
+//     GUI 同目录分发时不应因文件名带后缀而找不到 backend。
+//     仅接受合法 <GOOS>-<GOARCH> 后缀，避免误命中 contextloom-gui 等无关文件。
 func findContextLoomInDir(dir string) (string, bool) {
-	for _, name := range []string{"contextloom", "contextloom.exe"} {
-		p := filepath.Join(dir, name)
+	candidates := []string{"contextloom", "contextloom.exe"}
+	for _, c := range candidates {
+		p := filepath.Join(dir, c)
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			return p, true
 		}
 	}
+	// 带平台后缀的产物：contextloom-<GOOS>-<GOARCH>[.exe]
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	suffixes := []string{"", ".exe"}
+	for _, ent := range ents {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		for _, ext := range suffixes {
+			if !strings.HasSuffix(name, ext) {
+				continue
+			}
+			base := strings.TrimSuffix(name, ext)
+			if goos, goarch, ok := splitPlatformSuffix(base); ok {
+				_ = goos
+				_ = goarch
+				return filepath.Join(dir, name), true
+			}
+		}
+	}
 	return "", false
+}
+
+// findContextLoomPlatformBinInDir 在 PATH 目录中查找带平台后缀的 TUI 产物
+// （contextloom-<GOOS>-<GOARCH>，不带 .exe——PATH 场景下精确名已由 LookPath 处理）。
+func findContextLoomPlatformBinInDir(dir string) (string, bool) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	for _, ent := range ents {
+		if ent.IsDir() || strings.Contains(ent.Name(), ".") {
+			continue
+		}
+		if _, _, ok := splitPlatformSuffix(ent.Name()); ok {
+			return filepath.Join(dir, ent.Name()), true
+		}
+	}
+	return "", false
+}
+
+// splitPlatformSuffix 判断 base 是否为 contextloom-<GOOS>-<GOARCH> 形式。
+// <GOOS>/<GOARCH> 必须是 Go 已知的合法平台组合（go tool dist list 子集），
+// 防止误命中 contextloom-gui、contextloom-agent-config 之类的无关文件。
+func splitPlatformSuffix(base string) (string, string, bool) {
+	const prefix = "contextloom-"
+	if !strings.HasPrefix(base, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(base, prefix)
+	dash := strings.LastIndex(rest, "-")
+	if dash <= 0 || dash == len(rest)-1 {
+		return "", "", false
+	}
+	goos, goarch := rest[:dash], rest[dash+1:]
+	if !validPlatform(goos, goarch) {
+		return "", "", false
+	}
+	return goos, goarch, true
+}
+
+// validPlatform 白名单校验：Makefile 与文档打包命令覆盖的 GOOS/GOARCH 组合。
+func validPlatform(goos, goarch string) bool {
+	switch goarch {
+	case "amd64", "arm64":
+		switch goos {
+		case "linux", "darwin", "windows":
+			return true
+		}
+	}
+	return false
 }
 
 // probeBackend 探测 backend 是否存活。
