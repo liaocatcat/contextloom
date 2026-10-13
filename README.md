@@ -268,8 +268,8 @@ CGO_ENABLED=1 go build -tags production -ldflags="-s -w" -o contextloom-gui ./cm
 ## Download & Install (Prebuilt Binaries)
 
 Prebuilt binaries for every supported platform are attached to each
-[release](https://github.com/liaocatcat/contextloom/releases) (also mirrored on
-[Gitee](https://gitee.com/liao-yexian-my/contextloom/releases)). No Go toolchain required.
+[release](https://github.com/liaocatcat/ds-contextloom-harness/releases) (also mirrored on
+[Gitee](https://gitee.com/liao-yexian-my/ds-contextloom-harness/releases)). No Go toolchain required.
 
 **Pick your file:** `contextloom-<os>-<arch>[.exe]` is the **TUI** (terminal) build;
 `contextloom-gui-<os>-<arch>[.exe]` is the **GUI** (desktop window) build.
@@ -305,7 +305,7 @@ chmod +x contextloom-linux-amd64 && ./contextloom-linux-amd64 --version
 ## Quick Start
 
 ```bash
-git clone https://github.com/liaocatcat/contextloom.git
+git clone https://github.com/liaocatcat/ds-contextloom-harness.git
 cd contextloom
 
 # 1. Configure
