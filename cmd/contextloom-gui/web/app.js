@@ -334,6 +334,9 @@ async function connectProj(dir) {
           const bs = conn.background || (conn.background = {});
           const sidKey = sid || "";
           const b = bs[sidKey] || (bs[sidKey] = { buf: "", streaming: true, streamId });
+          // 归档条目补全流标识：停止标记按 streamId 精确匹配，缺失则只能
+          // 靠会话级标记（10s 过期）过滤——补全后残余事件可长期精确丢弃
+          if (b.streamId == null && streamId != null) b.streamId = streamId;
           b.buf += env.data.delta;
         }
       } else if (env.event === "agent.done") {
@@ -1305,8 +1308,14 @@ async function switchActiveConn(dir) {
   // loadSession，后台流已实时累积，无需等待后端）。
   if (exist && exist.background) {
     for (const sid of Object.keys(exist.background)) {
-      if (state.backgroundStreams[sid]) continue;
       const b = exist.background[sid];
+      // ⚠️ 移动语义（"切回后已停止对话被直接激活"根因）：无论合并还是丢弃，
+      // 一律从连接缓冲移除。旧实现只拷贝【引用】、不从连接缓冲删除——
+      // restoreCurrentSession 把条目移交前台（delete 全局键）后，连接缓冲的
+      // 陈旧副本不再随流更新却保留 streaming:true；等停止标记被 done 清理后，
+      // 下次切回又被合并 + 恢复渲染 → 已停止/已结束的对话复活成"● 生成中"。
+      delete exist.background[sid];
+      if (state.backgroundStreams[sid]) continue; // 全局已有条目（更新缓冲）：丢弃旧副本
       // 用户已显式停止的流不合并回全局（防止切回项目时被恢复成
       // "● 生成中"——复活已停止的对话）
       if ((b.streamId != null && state.stoppedStreams.has(b.streamId)) ||
@@ -1380,13 +1389,25 @@ async function afterProjectSwitch(dir) {
   //   - 子任务面板（subTasks）→ conn.subTasks
   //   - 归档后 state 重置为新项目视图，旧项目的运行时状态随连接保留。
   const oldConn = state.conns[prevDir ? normDir(prevDir) : ""];
-  if (oldConn && (state.streaming || state.subTasks.size > 0)) {
+  if (oldConn) {
+    const bs = oldConn.background || (oldConn.background = {});
     const sid = state.sessionId;
-    if (sid && state.streaming && state.streamBuf) {
-      const bs = oldConn.background || (oldConn.background = {});
+    // 用户已显式停止的前台流不归档：停止标记被 done 清理后，归档条目会在
+    // 下次切回时把已停止的对话重新激活（复活路径之一）
+    const frontStopped = !!sid && (state.stoppedSessions.has(sid) ||
+      (state.streamId != null && state.stoppedStreams.has(state.streamId)));
+    if (sid && state.streaming && state.streamBuf && !frontStopped) {
       // 归档携带 streamId（与 switchSession/closeTab 归档一致）：切回后
-      // 该流再被用户停止时可精确标记 stoppedStreams（否则停止标记对不上）
-      if (!bs[sid]) bs[sid] = { buf: state.streamBuf, streaming: true, streamId: state.streamId };
+      // 该流再被用户停止时可精确标记 stoppedStreams（否则停止标记对不上）。
+      // 赋值覆盖而非 if(!bs[sid])：前台状态永远是最新缓冲，旧残留副本不得保留。
+      bs[sid] = { buf: state.streamBuf, streaming: true, streamId: state.streamId };
+    }
+    // 本项目其他会话的后台在途缓冲【移动】回连接缓冲：切换期间 delta 从
+    // 原缓冲继续累积（跨切换连续），且全局不再保留副本——停止标记被 done
+    // 清理后不会在下次切回时复活已停止/已结束的流（与 switchActiveConn 的
+    // 移动语义配对：任何时刻流缓冲只有一份权威副本）。
+    for (const ksid of Object.keys(state.backgroundStreams)) {
+      bs[ksid] = state.backgroundStreams[ksid];
     }
     if (state.subTasks.size > 0) {
       oldConn.subTasks = state.subTasks;
