@@ -34,7 +34,7 @@ Every common pain point of general-purpose agent frameworks has a mechanistic an
 | "Cliff-edge amnesia" when long conversations exceed the window | Token-budget-driven **progressive layered compaction** (prefix truncation → drop oldest → rolling summary), and **compacted-original content is 100% retrievable via `harness_search`** — compaction ≠ loss |
 | Retrieval requires a bolted-on vector store; heavy infrastructure | Built-in **Harness hybrid retrieval engine**: inverted index + symbol index + lightweight semantic reranking (cross-language EN/ZH synonyms, FNV hash embeddings) — zero dependencies, pure in-memory, persistable |
 | Sub-agent output quality is uncontrollable; "claims done" cannot be verified | **Overseer + quality gates**: evidence-chain verification, test execution escrow (TEE) with real-run comparison to prevent self-deception; failing outputs are rejected and reworked, never surfaced |
-| All progress lost when an agent session crashes | **Multi-agent checkpoints** (JSONL persistence, comparable to LangGraph's checkpointer): the goal loop auto-saves every round and resumes after crashes |
+| All progress lost when an agent session crashes | **Multi-agent checkpoints** (JSONL-persisted durable state): the goal loop auto-saves every round and resumes after crashes |
 | Prompt engineering by hand; agents get dumber the longer they run | **Automatic employee experience distillation**: after each subtask completes, the model automatically distills "golden rules / pitfalls / style" into the employee's ontology profile, injected automatically on the next assignment — employees get better with use |
 | Model routing, rate limiting, and failover each hand-rolled separately | **Model gateway**: rule-based routing by role/task/budget, multi-key pooling with rotation, circuit-breaker auto-degradation |
 | Tool execution cannot be rolled back; security risks | **Tool sandbox**: write operations redirected to a shadow filesystem, forced network isolation (proxy pointed at a dead port), two-phase commit/discard |
@@ -152,7 +152,7 @@ Context management is ContextLoom's first-class citizen, centered on the `TokenB
 
 ### 11. Ecosystem Integration
 
-- **MCP, both directions**: an MCP Client consumes external tools (dynamically registered as `mcp.<server>.<tool>`); an MCP Server exposes Harness retrieval/memory/skills read-only over stdio JSON-RPC, for driving by [CC], Cursor, and others.
+- **MCP, both directions**: an MCP Client consumes external tools (dynamically registered as `mcp.<server>.<tool>`); an MCP Server exposes Harness retrieval/memory/skills read-only over stdio JSON-RPC, so any MCP-capable client can drive it.
 - **ACP service**: `--serve` headless mode (the GUI launcher starts it for you).
 - **External trigger channels**: webhook (HTTP POST + token auth, random port), cron (5-field expressions triggering goal/task/chat on a schedule, 30s precision).
 - **Skill marketplace**: `/market` searches built-in skills, `/market install <name>` installs them, and `/skills` enables them via interactive multi-select.
@@ -202,7 +202,7 @@ space becomes part of the variable value and Go fails with `unknown GOOS`):
 set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o contextloom-windows-amd64.exe .\cmd\contextloom
 ```
 
-Full matrix (arm64/386, PowerShell loop, cleanup) is in [docs/build.md §2.1](docs/build.md#21-full-cross-compile-matrix). Alternatively run the bash commands verbatim inside WSL / MSYS2 / Git Bash.
+The arm64/386 variants follow the same pattern (just swap `GOARCH`). Alternatively run the bash commands verbatim inside WSL / MSYS2 / Git Bash.
 
 </details>
 
@@ -272,7 +272,7 @@ CMD (single line; `set VAR=value&&` with no trailing space after the value):
 set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
 ```
 
-The full matrix (arm64, PowerShell loop, cleanup) is in [docs/build.md §2.1 / §2.2 / §3.2](docs/build.md#21-full-cross-compile-matrix).
+The arm64 variant follows the same pattern (swap `GOARCH=arm64` and the output name).
 
 </details>
 
@@ -479,18 +479,12 @@ Project-level data lives under the `.contextloom/` directory:
 
 ## Documentation
 
-| Page | Contents |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | Layer-by-layer architecture: UI shells, runtime, ctxmgr, executor, gateway, memory, sandbox, observability. |
-| [docs/context-engine.md](docs/context-engine.md) | Deep dive on fine-grained context management (three thresholds, five-step compaction, rolling summary) and the `harness_search` hybrid retrieval engine. |
-| [docs/design-philosophy.md](docs/design-philosophy.md) | Design philosophy in plain language — the 5 model limitations ContextLoom engineers around, and the mechanism answering each. |
-| [docs/comparison.md](docs/comparison.md) | Structural, checkable comparison against a naked LLM call, general agent frameworks (LangChain/LangGraph/AutoGPT/CrewAI), and coding agents (Claude Code/Cursor/OpenHands/aider). |
-| [docs/build.md](docs/build.md) | Complete cross-compilation matrix for the TUI (pure Go, every target) and the GUI shell (Wails/CGO, per platform), plus pitfalls and a Docker example. |
-| [docs/evaluation.md](docs/evaluation.md) | Observability, evaluation & audit: JSONL trace, OTLP export, `contextloom eval` / `eval-retrieval` (Recall@K / MRR), the quality ledger, and the evidence chain. |
-| [docs/plugins.md](docs/plugins.md) | Plugin model: employees, scenes, toolchains, gates, manifest plugins, and discovery/merge order. |
-| [docs/toolchain.md](docs/toolchain.md) | How employees / scenes / toolchains / gates compose into a supervised workbench. |
+- **This README** — features, architecture, install, build, configuration and usage.
+- **[README.zh-CN.md](README.zh-CN.md)** — Chinese edition.
+- **[docs/release/](docs/release/)** — release notes per version.
+- **[AGENTS.md](AGENTS.md)** — constraints for AI-assisted development · **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution workflow.
 
-Chinese editions: [architecture](docs/architecture.md) (EN) · [design-philosophy.zh-CN](docs/design-philosophy.zh-CN.md) · [comparison.zh-CN](docs/comparison.zh-CN.md) · [build.zh-CN](docs/build.zh-CN.md) · [evaluation.zh-CN](docs/evaluation.zh-CN.md).
+For implementation-level detail, read the source under `internal/` (`runtime`, `ctxmgr`, `executor`, `gateway`, `memory`, `sandbox`, `observability`); each package carries its own doc comments.
 
 ## Development
 

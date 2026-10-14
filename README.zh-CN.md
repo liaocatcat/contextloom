@@ -34,7 +34,7 @@ ContextLoom 是一个用 Go 编写的编码智能体 Harness（驾驶舱）。�
 | 长对话超窗后"断崖失忆" | token 预算驱动的**渐进式分层压缩**（前缀截断 → 丢弃最旧 → 滚动摘要），且**被压缩原文 100% 可通过 `harness_search` 找回**——压缩 ≠ 丢失 |
 | 检索靠外挂向量库、重资产 | 内置 **Harness 混合检索引擎**：倒排索引 + 符号索引 + 轻量语义重排（中英跨语言同义词、FNV 哈希嵌入），零依赖、纯内存、可持久化 |
 | 子 Agent 产出质量不可控、"声称完成"无法验证 | **监工（Overseer）+ 质量门禁**：证据链核验、测试透明代理（TEE）实测对比防自我欺骗，不达标打回重做、绝不外显 |
-| Agent 会话崩溃后进度全丢 | **多 Agent 检查点**（对标 LangGraph checkpointer 的 JSONL 落地），goal 循环每轮自动落盘、崩溃恢复续跑 |
+| Agent 会话崩溃后进度全丢 | **多 Agent 检查点**（JSONL 持久化状态）：goal 循环每轮自动落盘、崩溃恢复续跑 |
 | 提示词工程靠手工、越干越笨 | **员工经验自动蒸馏**：子任务完成后模型自动提炼"金规/踩坑/风格"沉淀进员工本体档案，下次指派自动注入——员工越干越熟 |
 | 模型路由、限流、故障切换各写各的 | **模型网关**：按 role/task/budget 规则路由、多 Key 池化轮换、熔断自动降级 |
 | 工具执行无法回滚、有安全风险 | **工具沙箱**：写操作重定向影子文件系统、网络强制隔离（代理指向死端口）、commit/discard 两段式提交 |
@@ -152,7 +152,7 @@ ContextLoom 是一个用 Go 编写的编码智能体 Harness（驾驶舱）。�
 
 ### 11. 生态接入
 
-- **MCP 双向**：MCP Client 消费外部工具（动态注册为 `mcp.<server>.<tool>`）；MCP Server 以 stdio JSON-RPC 只读暴露 Harness 检索/记忆/技能，供 [CC]、Cursor 等驱动。
+- **MCP 双向**：MCP Client 消费外部工具（动态注册为 `mcp.<server>.<tool>`）；MCP Server 以 stdio JSON-RPC 只读暴露 Harness 检索/记忆/技能，任何支持 MCP 的客户端均可驱动。
 - **ACP 服务**：`--serve` headless 模式（GUI 启动器即拉起它）。
 - **外部触发渠道**：webhook（HTTP POST + token 鉴权，随机端口）、cron（5 字段表达式定时触发 goal/task/chat，精度 30s 内）。
 - **技能市场**：`/market` 搜索内置技能、`/market install <name>` 安装，`/skills` 交互式多选启用。
@@ -201,7 +201,7 @@ CMD（`set VAR=value&&`——`&&` 前不留空格、值后不留尾随空格，�
 set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o contextloom-windows-amd64.exe .\cmd\contextloom
 ```
 
-完整矩阵（arm64/386、PowerShell 批量循环、清理变量）见 [docs/build.zh-CN.md §2.1](docs/build.zh-CN.md)。也可以在 WSL / MSYS2 / Git Bash 中原样运行上方 bash 命令。
+arm64/386 等目标同理，改 `GOARCH` 即可。也可以在 WSL / MSYS2 / Git Bash 中原样运行上方 bash 命令。
 
 </details>
 
@@ -279,7 +279,7 @@ CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
 > set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
 > ```
 >
-> 完整 PowerShell/CMD 矩阵（含 arm64 目标、续行符写法）见 [docs/build.zh-CN.md §3.2](docs/build.zh-CN.md)。
+> arm64 目标同理（改 `GOARCH=arm64` 与输出名）。
 
 #### Linux（本机构建，需 WebKitGTK 开发库）
 
@@ -466,18 +466,12 @@ contextloom --version
 
 ## 文档索引
 
-| 页面 | 内容 |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | 分层架构：UI 外壳、runtime、ctxmgr、executor、网关、记忆、沙箱、可观测性。 |
-| [docs/context-engine.md](docs/context-engine.md) | 上下文精细管理（三档阈值、五步压缩、滚动摘要）与 `harness_search` 混合检索引擎深读。 |
-| [docs/design-philosophy.zh-CN.md](docs/design-philosophy.zh-CN.md) | 设计哲学大白话——模型 5 类固有局限，以及针对每一条的机制性回答。 |
-| [docs/comparison.zh-CN.md](docs/comparison.zh-CN.md) | 与裸跑 LLM、通用 Agent 框架（LangChain/LangGraph/AutoGPT/CrewAI）、编码智能体（Claude Code/Cursor/OpenHands/aider）的结构性、可核查对比。 |
-| [docs/build.zh-CN.md](docs/build.zh-CN.md) | TUI（纯 Go，全平台）与 GUI（Wails/CGO，逐平台）完整交叉编译矩阵，附常见坑与 Docker 示例。 |
-| [docs/evaluation.zh-CN.md](docs/evaluation.zh-CN.md) | 可观测、可评估与可审计：JSONL trace、OTLP 导出、`contextloom eval` / `eval-retrieval`（Recall@K / MRR）、质量账本与证据链。 |
-| [docs/plugins.md](docs/plugins.md) | 插件体系：员工、场景、工具链、门禁、Manifest 插件及发现/合并顺序。 |
-| [docs/toolchain.md](docs/toolchain.md) | 员工 / 场景 / 工具链 / 门禁如何组合成受监工把关的工作台。 |
+- **本 README** —— 功能、架构、安装、构建、配置与使用。
+- **[README.md](README.md)** —— 英文版。
+- **[docs/release/](docs/release/)** —— 各版本发布说明。
+- **[AGENTS.md](AGENTS.md)** —— AI 协作开发约束 · **[CONTRIBUTING.md](CONTRIBUTING.md)** —— 贡献流程。
 
-英文版：同上各页的英文版（architecture / context-engine / design-philosophy / comparison / build / evaluation / plugins / toolchain）。
+更细的实现说明直接看 `internal/` 下的源码（`runtime`、`ctxmgr`、`executor`、`gateway`、`memory`、`sandbox`、`observability`），各包均带自身文档注释。
 
 ## 开发
 
