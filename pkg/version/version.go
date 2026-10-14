@@ -3,4 +3,4 @@
 package version
 
 // Version 是 ContextLoom 当前版本号。
-const Version = "2.4.0"
+const Version = "2.5.0"
