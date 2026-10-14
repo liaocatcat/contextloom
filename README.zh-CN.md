@@ -158,8 +158,27 @@ CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o contextloom
 ```
 
 > ⚠️ TUI 的 Windows 构建**不要**加 `-H windowsgui`：TUI 是控制台程序，加了会导致无法在终端交互输出。
->
-> 💡 Windows 原生用户注意：bash 的 `VAR=x cmd` 变量前缀语法在 PowerShell/CMD 中不可用，请改用 `$env:GOOS="windows"` 等 `$env:` 赋值写法（含完整 PowerShell/CMD 等价命令与 CMD `set` 的尾随空格坑说明），见 [docs/build.zh-CN.md §2.1](docs/build.zh-CN.md)。
+
+<details>
+<summary><strong>Windows 本机（PowerShell / CMD）</strong>——上方的 bash 环境变量前缀不可直接使用</summary>
+
+PowerShell（`$env:` 赋值写法；**不要**用 `VAR=value go build`）：
+
+```powershell
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
+```
+
+CMD（`set VAR=value&&`——`&&` 前不留空格、值后不留尾随空格，否则空格会并入变量值，Go 报 `unknown GOOS`）：
+
+```cmd
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o contextloom-windows-amd64.exe .\cmd\contextloom
+```
+
+完整矩阵（arm64/386、PowerShell 批量循环、清理变量）见 [docs/build.zh-CN.md §2.1](docs/build.zh-CN.md)。也可以在 WSL / MSYS2 / Git Bash 中原样运行上方 bash 命令。
+
+</details>
 
 或使用 Makefile（封装同样命令）：
 
@@ -229,7 +248,13 @@ CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
 > Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 > ```
 >
-> 完整 PowerShell/CMD 矩阵（含 arm64 目标、CMD `set X=Y&&` 尾随空格坑、续行符写法）见 [docs/build.zh-CN.md §3.2](docs/build.zh-CN.md)。
+> CMD 等价命令（单行；`set X=Y&&` 等号后不留尾随空格）：
+>
+> ```cmd
+> set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
+> ```
+>
+> 完整 PowerShell/CMD 矩阵（含 arm64 目标、续行符写法）见 [docs/build.zh-CN.md §3.2](docs/build.zh-CN.md)。
 
 #### Linux（本机构建，需 WebKitGTK 开发库）
 

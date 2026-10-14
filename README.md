@@ -153,14 +153,33 @@ CGO_ENABLED=0 GOOS=linux   GOARCH=arm   GOARM=7 go build -ldflags="-s -w" -o con
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
 CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o contextloom-windows-arm64.exe ./cmd/contextloom
 
-# Windows native (PowerShell/CMD): the bash env prefixes above do not work as-is —
-# use `$env:` assignment syntax instead, see docs/build.md §2.1 ("Windows native — PowerShell / CMD").
-
 # FreeBSD
 CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o contextloom-freebsd-amd64 ./cmd/contextloom
 ```
 
 > ⚠️ Do **not** add `-H windowsgui` to Windows TUI builds: the TUI is a console program, and that flag would break terminal interaction and output.
+
+<details>
+<summary><strong>Windows native (PowerShell / CMD)</strong> — the bash env prefixes above do not work as-is</summary>
+
+PowerShell (`$env:` assignment; do **not** use `VAR=value go build`):
+
+```powershell
+$env:CGO_ENABLED="0"; $env:GOOS="windows"; $env:GOARCH="amd64"
+go build -ldflags="-s -w" -o contextloom-windows-amd64.exe ./cmd/contextloom
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
+```
+
+CMD (`set VAR=value&&` — no space before `&&` and no trailing space after the value, or the
+space becomes part of the variable value and Go fails with `unknown GOOS`):
+
+```cmd
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -ldflags="-s -w" -o contextloom-windows-amd64.exe .\cmd\contextloom
+```
+
+Full matrix (arm64/386, PowerShell loop, cleanup) is in [docs/build.md §2.1](docs/build.md#21-full-cross-compile-matrix). Alternatively run the bash commands verbatim inside WSL / MSYS2 / Git Bash.
+
+</details>
 
 Or use the Makefile (which wraps the same commands):
 
@@ -222,7 +241,13 @@ go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-wind
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 ```
 
-The full matrix (arm64, CMD variants, batch loop) is in [docs/build.md §2.1 / §2.2 / §3.2](docs/build.md#21-full-cross-compile-matrix).
+CMD (single line; `set VAR=value&&` with no trailing space after the value):
+
+```cmd
+set CGO_ENABLED=0&& set GOOS=windows&& set GOARCH=amd64&& go build -tags production -ldflags="-s -w -H windowsgui" -o contextloom-gui-windows-amd64.exe .\cmd\contextloom-gui
+```
+
+The full matrix (arm64, PowerShell loop, cleanup) is in [docs/build.md §2.1 / §2.2 / §3.2](docs/build.md#21-full-cross-compile-matrix).
 
 </details>
 
