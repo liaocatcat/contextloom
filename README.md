@@ -10,6 +10,15 @@ Go 1.22+ · macOS / Linux / Windows · MIT License
 
 </div>
 
+## Repository Addresses
+
+| Region | Repository |
+|---|---|
+| 🇨🇳 China (mainland) | **https://gitee.com/liao-yexian-my/ds-contextloom-harness** (Gitee) |
+| 🌍 International | **https://github.com/liaocatcat/ds-contextloom-harness** (GitHub) |
+
+> The two repositories are kept in sync. Users in mainland China should clone / download releases from **Gitee**; everyone else may use **GitHub**. All download/clone commands below use GitHub links by default — if you are in mainland China, simply replace `https://github.com/liaocatcat/...` with `https://gitee.com/liao-yexian-my/...`.
+
 ---
 
 ContextLoom is a coding agent harness (cockpit) written in Go. It drives LLMs through a terminal (TUI), a native desktop window (GUI), or any MCP/ACP-compatible external tool, while a context engine guarantees information density on every request: long conversations are progressively compacted against a token budget, compacted-original content is never lost (it remains retrievable), project memory persists across sessions, and sub-agent outputs must pass a scoring gate review before they are ever shown to you.
@@ -29,6 +38,22 @@ Every common pain point of general-purpose agent frameworks has a mechanistic an
 | Prompt engineering by hand; agents get dumber the longer they run | **Automatic employee experience distillation**: after each subtask completes, the model automatically distills "golden rules / pitfalls / style" into the employee's ontology profile, injected automatically on the next assignment — employees get better with use |
 | Model routing, rate limiting, and failover each hand-rolled separately | **Model gateway**: rule-based routing by role/task/budget, multi-key pooling with rotation, circuit-breaker auto-degradation |
 | Tool execution cannot be rolled back; security risks | **Tool sandbox**: write operations redirected to a shadow filesystem, forced network isolation (proxy pointed at a dead port), two-phase commit/discard |
+
+## Does ContextLoom Save Tokens?
+
+**Short answer: yes — but the honest claim is "each request carries only what is needed", not a fixed discount.**
+
+| Mechanism | Where | What it does |
+|---|---|---|
+| Token-budget progressive compaction | `internal/ctxmgr` | Long conversations are compacted against a token budget (70% / 85% / 92% thresholds) instead of being resent in full. |
+| Compacted originals are **not** re-injected | `internal/executor/agent.go` (`contextBlocksForInject`) | Removed text goes into the retrieval index and is pulled back **only** when the model calls `harness_search`. This is the pitfall most systems hit — summarize, then quietly re-add the original; here the payload genuinely shrinks. |
+| Structured minimal prompts + vocabulary | `internal/preprocessor` | Input is mapped to a compact intent/entity directive; project-specific terms can be shortened via confirmed vocabulary entries. |
+| On-demand retrieval instead of resident context | `internal/harness` | Only relevant blocks are selected; low-scoring blocks are overflow-compressed (first 100 runes) and injected blocks are truncated (2000 runes). |
+| Generation-parameter decoupling | `max_output_tokens` / `max_input_tokens` / `thinking_length` | Cap the input, cap the output, and turn thinking off for cheap tasks (`thinking_length: off`) — thinking tokens are a real cost. |
+| De-duplication and small caches | `internal/tools/task.go`, `internal/executor/agent.go` | `singleflight` merges concurrent identical sub-task spawns; few-shot examples are trimmed on a prompt-cache hit; employee experience distillation is capacity-capped (≤ 1 KB growth) so the ontology never balloons into context. |
+| Result-size caps | `internal/tools/exec.go`, executor | `web_fetch` defaults to 4096 bytes; tool results and verifier targets are truncated. |
+
+**What we do *not* claim.** No fixed "saves N% tokens" figure is published: the savings depend on conversation length, task mix, and configuration. And the token estimator deliberately **over-estimates** (e.g. CJK at 0.9 vs a measured 0.7–0.8) so compaction fires early — that is a safety choice against API 400s, not a token saving. The defensible statement is: **per-request payload is bounded, de-duplicated, and retrieved on demand rather than kept resident.**
 
 ## Core Features
 

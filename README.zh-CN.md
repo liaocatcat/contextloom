@@ -10,6 +10,15 @@ Go 1.22+ · macOS / Linux / Windows · MIT 许可证
 
 </div>
 
+## 仓库地址
+
+| 地区 | 仓库 |
+|---|---|
+| 🇨🇳 国内 | **https://gitee.com/liao-yexian-my/ds-contextloom-harness**（Gitee） |
+| 🌍 国外 | **https://github.com/liaocatcat/ds-contextloom-harness**（GitHub） |
+
+> 两个仓库内容保持同步。国内用户请从 **Gitee** 克隆 / 下载 Release；国外用户可使用 **GitHub**。下文所有下载/克隆命令默认使用 GitHub 链接——国内用户只需把 `https://github.com/liaocatcat/...` 替换为 `https://gitee.com/liao-yexian-my/...` 即可。
+
 ---
 
 ContextLoom 是一个用 Go 编写的编码智能体 Harness（驾驶舱）。它通过终端（TUI）、原生桌面窗口（GUI）或任何兼容 MCP/ACP 的外部工具驱动 LLM，同时由上下文引擎保证每次请求的信息密度：长对话按 token 预算渐进压缩、被压缩的原文永不丢失（可检索找回）、项目记忆跨会话持久、子智能体的产出要经过评分门禁审查后才会呈现给你。
@@ -29,6 +38,22 @@ ContextLoom 是一个用 Go 编写的编码智能体 Harness（驾驶舱）。�
 | 提示词工程靠手工、越干越笨 | **员工经验自动蒸馏**：子任务完成后模型自动提炼"金规/踩坑/风格"沉淀进员工本体档案，下次指派自动注入——员工越干越熟 |
 | 模型路由、限流、故障切换各写各的 | **模型网关**：按 role/task/budget 规则路由、多 Key 池化轮换、熔断自动降级 |
 | 工具执行无法回滚、有安全风险 | **工具沙箱**：写操作重定向影子文件系统、网络强制隔离（代理指向死端口）、commit/discard 两段式提交 |
+
+## ContextLoom 能节约 Token 吗？
+
+**结论：能——但诚实的说法是"每次请求只携带必要内容"，而不是一个固定的折扣比例。**
+
+| 机制 | 位置 | 作用 |
+|---|---|---|
+| Token 预算驱动的渐进压缩 | `internal/ctxmgr` | 长对话按 token 预算（70% / 85% / 92% 三档阈值）压缩，而不是每次全量重发。 |
+| 压缩原文**不会**被自动回灌 | `internal/executor/agent.go`（`contextBlocksForInject`） | 被移除的原文写入检索索引，**只有**模型主动调用 `harness_search` 时才取回。这正是多数系统踩的坑——先摘要、又悄悄把原文塞回请求；这里发送量是真的变小。 |
+| 结构化极简提示词 + 词汇压缩 | `internal/preprocessor` | 输入被映射为紧凑的意图/实体指令；项目专有术语可经确认后缩写。 |
+| 按需检索替代常驻上下文 | `internal/harness` | 只挑选相关块；低分块溢出压缩（保留前 100 字符），注入块截断（2000 字符）。 |
+| 生成参数解耦 | `max_output_tokens` / `max_input_tokens` / `thinking_length` | 可限制输入、限制输出，并为低成本任务关闭思考（`thinking_length: off`）——思考 token 是真实成本。 |
+| 去重与小缓存 | `internal/tools/task.go`、`internal/executor/agent.go` | `singleflight` 合并并发的相同子任务；提示词缓存命中时精简 few-shot 示例；员工经验蒸馏有容量上限（单次 ≤ 1KB），本体不会膨胀进上下文。 |
+| 结果大小上限 | `internal/tools/exec.go`、executor | `web_fetch` 默认 4096 字节；工具结果与复核目标截断。 |
+
+**我们不宣称的。** 不发布"节约 N% token"这类固定数字——节约幅度取决于对话长度、任务构成与配置。而且 token 估算器是**刻意高估**的（如中文按 0.9、实测约 0.7–0.8），以便更早触发压缩，这是防 API 400 的安全选择，不是节约。可辩护的表述是：**每次请求的载荷是有界的、去重的，并且是按需检索而非常驻上下文。**
 
 ## 核心特性
 
