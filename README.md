@@ -352,6 +352,74 @@ chmod +x contextloom-linux-amd64 && ./contextloom-linux-amd64 --version
 > with `-tags production` (see §GUI Desktop Shell) — on a headless host it automatically falls
 > back to browser mode.
 
+### ⭐ Put the Binary on Your PATH (Run `contextloom` from Anywhere)
+
+After downloading (or building), move the binary into a directory that is already on your `PATH`
+— or add its directory to `PATH` — so you can type `contextloom` instead of `./contextloom`.
+Both the TUI (`contextloom`) and the GUI (`contextloom-gui`) work this way; keep them in the
+**same directory** if you use the GUI.
+
+**Option A — drop it into a directory already on `PATH` (recommended):**
+
+```bash
+# macOS (Apple Silicon) — /opt/homebrew/bin is on PATH if Homebrew is installed
+sudo install -m 0755 contextloom-darwin-arm64 /opt/homebrew/bin/contextloom
+
+# macOS (Intel)
+sudo install -m 0755 contextloom-darwin-amd64 /usr/local/bin/contextloom
+
+# Linux
+sudo install -m 0755 contextloom-linux-amd64 /usr/local/bin/contextloom
+```
+
+```powershell
+# Windows (PowerShell, user scope — no admin needed)
+New-Item -ItemType Directory -Force "$env:USERPROFILE\bin" | Out-Null
+Copy-Item contextloom-windows-amd64.exe "$env:USERPROFILE\bin\contextloom.exe"
+```
+
+(For Windows Option A to work, `%USERPROFILE%\bin` must already be on `PATH`; if not, use
+Option B below once and it will be.)
+
+**Option B — add the binary's own directory to `PATH` (wherever you keep it):**
+
+```bash
+# macOS (zsh, Apple Silicon example)
+echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# Linux (bash)
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+```powershell
+# Windows (PowerShell — persists for the current user)
+[Environment]::SetEnvironmentVariable("Path",
+  [Environment]::GetEnvironmentVariable("Path","User") + ";$env:USERPROFILE\bin", "User")
+```
+
+```cmd
+:: Windows (CMD — alternative GUI way)
+:: Run:  rundll32 sysdm.cpl,EditEnvironmentVariables
+:: Edit "Path" → New → append the binary's directory → OK, then reopen the terminal.
+```
+
+**Verify — open a NEW terminal window, then:**
+
+```bash
+contextloom --version    # works in any directory
+which contextloom        # macOS/Linux: shows the resolved path
+where contextloom        # Windows CMD/PowerShell
+```
+
+> **Notes**
+> - `~/.local/bin` (Linux) and `/opt/homebrew/bin` (macOS) are commonly on `PATH` already —
+>   `echo $PATH` to check what you have.
+> - Windows: changes made via the System Properties dialog or the PowerShell snippet above only
+>   take effect in terminals opened **after** the change.
+> - The GUI (`contextloom-gui`) still needs the `contextloom` backend next to it (or
+>   `CONTEXTLOOM_BIN` set) — see the note above; PATH registration does not remove that
+>   requirement.
+
 ## Quick Start
 
 ```bash

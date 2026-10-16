@@ -339,6 +339,71 @@ chmod +x contextloom-linux-amd64 && ./contextloom-linux-amd64 --version
 > 兼顾各发行版 GTK3/WebKitGTK 版本差异。请用 `-tags production` 从源码构建（见「GUI 桌面外壳」）——
 > 无显示环境下会自动降级为浏览器模式。
 
+### ⭐ 把二进制加入 PATH 环境变量（让命令全局生效）
+
+下载（或构建）完成后，把二进制移入一个已在 `PATH` 中的目录——或把其所在目录加入 `PATH`——
+即可在任意位置直接输入 `contextloom`，而不必 `./contextloom`。TUI（`contextloom`）与
+GUI（`contextloom-gui`）都适用；若使用 GUI，两个二进制仍需放在**同一目录**。
+
+**方式一 — 移入已在 `PATH` 中的目录（推荐）：**
+
+```bash
+# macOS（Apple Silicon）—— 装有 Homebrew 时 /opt/homebrew/bin 已在 PATH 中
+sudo install -m 0755 contextloom-darwin-arm64 /opt/homebrew/bin/contextloom
+
+# macOS（Intel）
+sudo install -m 0755 contextloom-darwin-amd64 /usr/local/bin/contextloom
+
+# Linux
+sudo install -m 0755 contextloom-linux-amd64 /usr/local/bin/contextloom
+```
+
+```powershell
+# Windows（PowerShell，用户级，无需管理员）
+New-Item -ItemType Directory -Force "$env:USERPROFILE\bin" | Out-Null
+Copy-Item contextloom-windows-amd64.exe "$env:USERPROFILE\bin\contextloom.exe"
+```
+
+（若 `%USERPROFILE%\bin` 尚未在 `PATH` 中，方式一不会生效，请先执行一次方式二。）
+
+**方式二 — 把二进制所在目录加入 `PATH`（目录随意放）：**
+
+```bash
+# macOS（zsh，以 Apple Silicon 为例）
+echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# Linux（bash）
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+```powershell
+# Windows（PowerShell —— 对当前用户永久生效）
+[Environment]::SetEnvironmentVariable("Path",
+  [Environment]::GetEnvironmentVariable("Path","User") + ";$env:USERPROFILE\bin", "User")
+```
+
+```cmd
+:: Windows（CMD —— 图形界面替代方式）
+:: 运行：rundll32 sysdm.cpl,EditEnvironmentVariables
+:: 编辑 "Path" → 新建 → 填入二进制所在目录 → 确定，然后重新打开终端。
+```
+
+**验证 —— 重新开一个终端窗口：**
+
+```bash
+contextloom --version    # 任意目录下均可运行
+which contextloom        # macOS/Linux：查看解析到的路径
+where contextloom        # Windows CMD/PowerShell
+```
+
+> **注意**
+> - `~/.local/bin`（Linux）与 `/opt/homebrew/bin`（macOS）通常已在 `PATH` 中——先
+>   `echo $PATH` 看看有哪些可用目录。
+> - Windows：通过系统属性对话框或上面 PowerShell 命令做的修改，只对**修改之后**新开的
+>   终端窗口生效。
+> - GUI（`contextloom-gui`）仍需要 `contextloom` 后端在旁边（或设置 `CONTEXTLOOM_BIN`）——
+>   见上方说明；注册 PATH 并不能免除该要求。
+
 ## 快速开始
 
 ```bash
